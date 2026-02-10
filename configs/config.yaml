@@ -75,8 +75,8 @@ hawkes:
   auto_adjust_min_events: true
   auto_min_events_floor: 5
 strategy:
-  entry_k: 0.5
-  t_widen_quantile: 0.99
+  entry_k: 0.28
+  t_widen_quantile: 0.9
   chi_widen_quantile: 0.99
   threshold_mode: expanding
   threshold_min_periods: 120

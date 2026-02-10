@@ -69,6 +69,7 @@ def _decision_to_position_stateful(
 
     for i, (decision_i, m_i) in enumerate(zip(decision.to_numpy(), m_t.to_numpy())):
         current = prev_pos
+        exited_this_bar = False
 
         if current != 0.0:
             should_exit = False
@@ -83,13 +84,17 @@ def _decision_to_position_stateful(
                 should_exit = True
             if should_exit:
                 current = 0.0
+                exited_this_bar = True
 
-        target = _position_from_trade_signal(decision_i, float(m_i) if np.isfinite(m_i) else np.nan)
-        if target != 0.0:
-            if current == 0.0:
-                current = target
-            elif np.sign(current) != np.sign(target):
-                current = target
+        # Enforce exit conditions for this bar; otherwise max-holding and safety exits
+        # can be bypassed by immediate same-bar re-entry.
+        if not exited_this_bar:
+            target = _position_from_trade_signal(decision_i, float(m_i) if np.isfinite(m_i) else np.nan)
+            if target != 0.0:
+                if current == 0.0:
+                    current = target
+                elif np.sign(current) != np.sign(target):
+                    current = target
 
         if current == 0.0:
             holding = 0

@@ -118,6 +118,29 @@ class HitRateTests(unittest.TestCase):
         self.assertLess(float(wrong_legacy), float(metrics["hit_rate"]))
 
 
+class StatefulExitTests(unittest.TestCase):
+    def test_max_holding_bars_enforces_exit_without_same_bar_reentry(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=6, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 0.1, 0.2, 0.3, 0.4, 0.5], index=idx, name="premium")
+        decision = pd.Series(["Trade"] * len(idx), index=idx, name="decision")
+        m_t = pd.Series([1.0] * len(idx), index=idx, name="m_t")
+
+        log, _ = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_mode="stateful",
+            min_holding_bars=1,
+            max_holding_bars=2,
+        )
+
+        self.assertEqual(float(log.loc[idx[2], "position"]), 0.0)
+        self.assertEqual(float(log.loc[idx[5], "position"]), 0.0)
+        self.assertEqual(int((log["position_event"] == "Exit").sum()), 2)
+
+
 class PriceMatrixLoaderTests(unittest.TestCase):
     def test_loader_drops_nat_and_duplicate_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

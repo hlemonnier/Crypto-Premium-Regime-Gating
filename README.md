@@ -80,6 +80,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Tests (CI-safe)
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py' -q
+```
+
 ## Expected input
 
 Main pipeline input is a price matrix (parquet recommended, csv supported):
@@ -208,8 +214,8 @@ python -m src.tune_gating \
 
 Latest tuned defaults now set in `configs/config.yaml`:
 
-- `strategy.entry_k: 0.5`
-- `strategy.t_widen_quantile: 0.99`
+- `strategy.entry_k: 0.28`
+- `strategy.t_widen_quantile: 0.9`
 - `strategy.chi_widen_quantile: 0.99`
 - `strategy.threshold_mode: expanding` (causal quantiles)
 - `regimes.stress_quantile: 0.9`
