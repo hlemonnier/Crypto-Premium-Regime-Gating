@@ -139,6 +139,12 @@ Optional output path:
 ./scripts/package_submission.sh /tmp/crypto_premium_submission.zip
 ```
 
+Optional cleanup helper before packaging:
+
+```bash
+./scripts/clean_local_artifacts.sh
+```
+
 ## One-command episode run (Binance)
 
 Download daily Binance futures klines, build the matrix, and run the full pipeline:
@@ -209,6 +215,7 @@ Latest tuned defaults now set in `configs/config.yaml`:
 - `regimes.stress_quantile: 0.9`
 - `regimes.recovery_quantile: 0.8`
 - `regimes.threshold_mode: expanding` (causal quantiles)
+- `regimes.zscore_mode: expanding` (causal robust standardization)
 
 If you need to reproduce legacy static-threshold behavior, switch both to:
 
@@ -223,6 +230,10 @@ If you need to reproduce legacy static-threshold behavior, switch both to:
 
 - `onchain_usdc_price`
 - `onchain_usdt_price`
+- `onchain_usdc_minus_1`
+- `onchain_usdt_minus_1`
+- `onchain_log_usdc_dev`
+- `onchain_log_usdt_dev`
 - `onchain_proxy`
 - `onchain_divergence`
 - `onchain_depeg_flag`
@@ -233,6 +244,12 @@ If you need to reproduce legacy static-threshold behavior, switch both to:
 - on-chain depeg flag from DefiLlama prices
 
 Configuration lives under `onchain:` in `configs/config.yaml`.
+
+Proxy availability note:
+
+- when cross-asset USDC/USDT proxy legs are available (typical Binance perp episodes), debiased premium `p` is fully informative
+- when they are unavailable for an episode, pipeline is fail-closed by default (`premium.fail_on_missing_proxy: true`) and the episode is skipped in multi-episode reports
+- if you intentionally disable fail-closed behavior, use that run primarily for depeg safety/on-chain validation and state that debiased premium is not the main signal
 
 ## Ablation report (single script)
 

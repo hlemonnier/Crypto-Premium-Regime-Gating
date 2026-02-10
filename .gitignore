@@ -2,11 +2,13 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
 .idea/
 reports/figures/
 reports/tables/
 reports/episodes/
 data/raw/
 data/processed/
-Notice.pdf
-Notice + Hawkes.pdf

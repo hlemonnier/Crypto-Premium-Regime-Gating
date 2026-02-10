@@ -28,6 +28,10 @@ class OnchainConfig:
 ONCHAIN_COLUMNS = [
     "onchain_usdc_price",
     "onchain_usdt_price",
+    "onchain_usdc_minus_1",
+    "onchain_usdt_minus_1",
+    "onchain_log_usdc_dev",
+    "onchain_log_usdt_dev",
     "onchain_proxy",
     "onchain_divergence",
     "onchain_depeg_flag",
@@ -40,6 +44,10 @@ def empty_onchain_frame(index: pd.Index) -> pd.DataFrame:
     frame = pd.DataFrame(index=index)
     frame["onchain_usdc_price"] = np.nan
     frame["onchain_usdt_price"] = np.nan
+    frame["onchain_usdc_minus_1"] = np.nan
+    frame["onchain_usdt_minus_1"] = np.nan
+    frame["onchain_log_usdc_dev"] = np.nan
+    frame["onchain_log_usdt_dev"] = np.nan
     frame["onchain_proxy"] = np.nan
     frame["onchain_divergence"] = np.nan
     frame["onchain_depeg_flag"] = False
@@ -132,6 +140,14 @@ def build_onchain_validation_frame(
 
     usdc = aligned["onchain_usdc_price"].astype(float)
     usdt = aligned["onchain_usdt_price"].astype(float)
+    usdc_minus_1 = (usdc - 1.0).rename("onchain_usdc_minus_1")
+    usdt_minus_1 = (usdt - 1.0).rename("onchain_usdt_minus_1")
+    log_usdc = pd.Series(np.nan, index=index, dtype=float, name="onchain_log_usdc_dev")
+    log_usdt = pd.Series(np.nan, index=index, dtype=float, name="onchain_log_usdt_dev")
+    pos_usdc = usdc.gt(0)
+    pos_usdt = usdt.gt(0)
+    log_usdc.loc[pos_usdc] = np.log(usdc.loc[pos_usdc])
+    log_usdt.loc[pos_usdt] = np.log(usdt.loc[pos_usdt])
     valid_price = usdc.gt(0) & usdt.gt(0)
     proxy = pd.Series(np.nan, index=index, dtype=float, name="onchain_proxy")
     proxy.loc[valid_price] = np.log(usdt.loc[valid_price]) - np.log(usdc.loc[valid_price])
@@ -153,6 +169,10 @@ def build_onchain_validation_frame(
         {
             "onchain_usdc_price": usdc,
             "onchain_usdt_price": usdt,
+            "onchain_usdc_minus_1": usdc_minus_1,
+            "onchain_usdt_minus_1": usdt_minus_1,
+            "onchain_log_usdc_dev": log_usdc,
+            "onchain_log_usdt_dev": log_usdt,
             "onchain_proxy": proxy,
             "onchain_divergence": divergence,
             "onchain_depeg_flag": onchain_depeg_flag,
@@ -162,4 +182,3 @@ def build_onchain_validation_frame(
         index=index,
     )
     return out
-

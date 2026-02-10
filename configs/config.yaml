@@ -59,6 +59,10 @@ regimes:
   cp_quantile: 0.9
   threshold_mode: expanding
   threshold_min_periods: 120
+  zscore_mode: expanding
+  zscore_min_periods: 120
+  zscore_window:
+  zscore_scale_floor: 1.0e-12
 hawkes:
   enabled: false
   warmup: 48h

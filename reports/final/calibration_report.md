@@ -15,25 +15,25 @@ Comparison: baseline Notice defaults vs tuned config on 2024 episodes.
 ```text
                        episode                                                              matrix_path  baseline_gated_sharpe  tuned_gated_sharpe  delta_gated_sharpe  baseline_gated_pnl_net  tuned_gated_pnl_net  delta_gated_pnl_net  baseline_gated_active_ratio  tuned_gated_active_ratio
          bybit_usdc_depeg_2023          data/processed/episodes/bybit_usdc_depeg_2023/prices_matrix.csv               0.000000            0.000000            0.000000                0.000000             0.000000             0.000000                     0.000000                  0.000000
-        march_vol_2024_binance         data/processed/episodes/march_vol_2024_binance/prices_matrix.csv             -40.669653           21.951045           62.620698               -0.000274             0.000697             0.000971                     0.003472                  0.107986
-           okx_usdc_depeg_2023            data/processed/episodes/okx_usdc_depeg_2023/prices_matrix.csv               0.000000           55.664006           55.664006                0.000000             0.004909             0.004909                     0.000000                  0.035417
-              smoke_2024_08_05               data/processed/episodes/smoke_2024_08_05/prices_matrix.csv             -54.738023           13.188629           67.926652               -0.000590             0.001930             0.002519                     0.011806                  0.511111
-yen_followthrough_2024_binance data/processed/episodes/yen_followthrough_2024_binance/prices_matrix.csv               0.000000            5.860367            5.860367                0.000000            -0.001800            -0.001800                     0.000000                  0.261806
-       yen_unwind_2024_binance        data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv             -15.853918            7.063795           22.917714               -0.000522             0.000423             0.000945                     0.008333                  0.532986
+        march_vol_2024_binance         data/processed/episodes/march_vol_2024_binance/prices_matrix.csv            -102.064655           23.550434          125.615090               -0.000541             0.001240             0.001781                     0.005208                  0.151389
+           okx_usdc_depeg_2023            data/processed/episodes/okx_usdc_depeg_2023/prices_matrix.csv               0.000000           42.764729           42.764729                0.000000             0.004972             0.004972                     0.000000                  0.044097
+              smoke_2024_08_05               data/processed/episodes/smoke_2024_08_05/prices_matrix.csv             -42.343225           10.607601           52.950826               -0.000510             0.001039             0.001549                     0.010417                  0.436111
+yen_followthrough_2024_binance data/processed/episodes/yen_followthrough_2024_binance/prices_matrix.csv             -31.346834            5.814444           37.161278               -0.000270            -0.001743            -0.001473                     0.004514                  0.336111
+       yen_unwind_2024_binance        data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv             -15.853918            5.514261           21.368179               -0.000522            -0.000239             0.000283                     0.008333                  0.504861
 ```
 
 ## Aggregate Stats
 
 ```text
-                                  mean     median        min        max
-baseline_gated_sharpe       -18.543599  -7.926959 -54.738023   0.000000
-tuned_gated_sharpe           17.287974  10.126212   0.000000  55.664006
-delta_gated_sharpe           35.831573  39.290860   0.000000  67.926652
-baseline_gated_pnl_net       -0.000231  -0.000137  -0.000590   0.000000
-tuned_gated_pnl_net           0.001026   0.000560  -0.001800   0.004909
-delta_gated_pnl_net           0.001257   0.000958  -0.001800   0.004909
-baseline_gated_active_ratio   0.003935   0.001736   0.000000   0.011806
-tuned_gated_active_ratio      0.241551   0.184896   0.000000   0.532986
+                                  mean     median         min         max
+baseline_gated_sharpe       -31.934772 -23.600376 -102.064655    0.000000
+tuned_gated_sharpe           14.708578   8.211023    0.000000   42.764729
+delta_gated_sharpe           46.643350  39.963004    0.000000  125.615090
+baseline_gated_pnl_net       -0.000307  -0.000390   -0.000541    0.000000
+tuned_gated_pnl_net           0.000878   0.000519   -0.001743    0.004972
+delta_gated_pnl_net           0.001185   0.000916   -0.001473    0.004972
+baseline_gated_active_ratio   0.004745   0.004861    0.000000    0.010417
+tuned_gated_active_ratio      0.245428   0.243750    0.000000    0.504861
 ```
 
 ## Skipped Episodes

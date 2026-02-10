@@ -7,6 +7,8 @@ import pandas as pd
 
 from src.thresholds import quantile_threshold
 
+VALID_ZSCORE_MODES = {"expanding", "rolling"}
+
 
 @dataclass(frozen=True)
 class RegimeConfig:
@@ -21,15 +23,58 @@ class RegimeConfig:
     threshold_mode: str = "expanding"
     threshold_min_periods: int = 120
     threshold_window: int | None = None
+    zscore_mode: str = "expanding"
+    zscore_min_periods: int = 120
+    zscore_window: int | None = None
+    zscore_scale_floor: float = 1e-12
 
 
-def _robust_zscore(series: pd.Series) -> pd.Series:
+def _window_mad(window: np.ndarray) -> float:
+    finite = window[np.isfinite(window)]
+    if finite.size == 0:
+        return np.nan
+    median = float(np.median(finite))
+    return float(np.median(np.abs(finite - median)))
+
+
+def _causal_robust_zscore(
+    series: pd.Series,
+    *,
+    mode: str = "expanding",
+    min_periods: int = 120,
+    window: int | None = None,
+    scale_floor: float = 1e-12,
+) -> pd.Series:
+    if mode not in VALID_ZSCORE_MODES:
+        raise ValueError(f"Unsupported zscore mode: {mode}. Expected one of {sorted(VALID_ZSCORE_MODES)}")
+
     values = series.astype(float)
-    median = float(np.nanmedian(values))
-    mad = float(np.nanmedian(np.abs(values - median)))
-    scale = 1.4826 * mad if mad > 1e-12 else float(np.nanstd(values))
-    scale = max(scale, 1e-12)
-    return (values - median) / scale
+    min_periods = max(2, int(min_periods))
+    floor = max(float(scale_floor), 1e-12)
+
+    if mode == "expanding":
+        median = values.expanding(min_periods=min_periods).median()
+        mad = values.expanding(min_periods=min_periods).apply(_window_mad, raw=True)
+        fallback_std = values.expanding(min_periods=min_periods).std(ddof=0)
+    else:
+        if window is None:
+            raise ValueError("window must be provided when zscore_mode='rolling'")
+        window = max(2, int(window))
+        roll_min = min(min_periods, window)
+        median = values.rolling(window=window, min_periods=roll_min).median()
+        mad = values.rolling(window=window, min_periods=roll_min).apply(_window_mad, raw=True)
+        fallback_std = values.rolling(window=window, min_periods=roll_min).std(ddof=0)
+
+    # Strictly causal: statistics at t are computed from history up to t-1.
+    median = median.shift(1)
+    mad = mad.shift(1)
+    fallback_std = fallback_std.shift(1)
+
+    scale = 1.4826 * mad
+    scale = scale.where(scale > floor, fallback_std)
+    scale = scale.clip(lower=floor)
+    z = (values - median) / scale
+    return z.rename(f"{series.name or 'series'}_z")
 
 
 def build_regime_score(
@@ -40,10 +85,32 @@ def build_regime_score(
     w_T: float,
     w_chi: float,
     w_H: float,
+    zscore_mode: str = "expanding",
+    zscore_min_periods: int = 120,
+    zscore_window: int | None = None,
+    zscore_scale_floor: float = 1e-12,
 ) -> pd.Series:
-    z_H = _robust_zscore(H_t)
-    z_T = _robust_zscore(T_t)
-    z_chi = _robust_zscore(chi_t)
+    z_H = _causal_robust_zscore(
+        H_t,
+        mode=zscore_mode,
+        min_periods=zscore_min_periods,
+        window=zscore_window,
+        scale_floor=zscore_scale_floor,
+    )
+    z_T = _causal_robust_zscore(
+        T_t,
+        mode=zscore_mode,
+        min_periods=zscore_min_periods,
+        window=zscore_window,
+        scale_floor=zscore_scale_floor,
+    )
+    z_chi = _causal_robust_zscore(
+        chi_t,
+        mode=zscore_mode,
+        min_periods=zscore_min_periods,
+        window=zscore_window,
+        scale_floor=zscore_scale_floor,
+    )
     score = (w_T * z_T) + (w_chi * z_chi) + (w_H * z_H)
     return score.rename("regime_score")
 
@@ -156,6 +223,10 @@ def build_regime_frame(states: pd.DataFrame, cfg: RegimeConfig) -> pd.DataFrame:
         w_T=cfg.weight_temperature,
         w_chi=cfg.weight_susceptibility,
         w_H=cfg.weight_entropy,
+        zscore_mode=cfg.zscore_mode,
+        zscore_min_periods=cfg.zscore_min_periods,
+        zscore_window=cfg.zscore_window,
+        zscore_scale_floor=cfg.zscore_scale_floor,
     )
     return detect_regime(
         score,

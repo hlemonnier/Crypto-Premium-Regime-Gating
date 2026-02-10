@@ -34,18 +34,44 @@ def _read_onchain_snapshot(episode: str, reports_root: Path) -> dict[str, Any] |
     if not signal_path.exists():
         return None
     frame = pd.read_csv(signal_path)
-    needed = {"onchain_proxy", "onchain_divergence", "onchain_depeg_flag", "depeg_flag"}
+    needed = {
+        "onchain_proxy",
+        "onchain_divergence",
+        "onchain_depeg_flag",
+        "depeg_flag",
+        "onchain_usdc_minus_1",
+        "onchain_usdt_minus_1",
+    }
     if not needed.issubset(set(frame.columns)):
         return None
     return {
         "episode": episode,
         "onchain_data_ratio": float(pd.to_numeric(frame["onchain_proxy"], errors="coerce").notna().mean()),
+        "onchain_usdc_minus_1_abs_mean": float(
+            pd.to_numeric(frame["onchain_usdc_minus_1"], errors="coerce").abs().mean(skipna=True)
+        ),
+        "onchain_usdt_minus_1_abs_mean": float(
+            pd.to_numeric(frame["onchain_usdt_minus_1"], errors="coerce").abs().mean(skipna=True)
+        ),
         "onchain_divergence_abs_mean": float(
             pd.to_numeric(frame["onchain_divergence"], errors="coerce").abs().mean(skipna=True)
         ),
         "onchain_depeg_count": int(pd.to_numeric(frame["onchain_depeg_flag"], errors="coerce").fillna(0).astype(bool).sum()),
         "combined_depeg_count": int(pd.to_numeric(frame["depeg_flag"], errors="coerce").fillna(0).astype(bool).sum()),
     }
+
+
+def _read_proxy_coverage(episode: str, reports_root: Path) -> dict[str, Any] | None:
+    proxy_path = reports_root / "episodes" / episode / "tables" / "stablecoin_proxy_components.csv"
+    if not proxy_path.exists():
+        return None
+    frame = pd.read_csv(proxy_path, nrows=1)
+    cols = [
+        c
+        for c in frame.columns
+        if c not in {"timestamp_utc", "Unnamed: 0"} and not str(c).startswith("Unnamed:")
+    ]
+    return {"episode": episode, "proxy_component_count": int(len(cols))}
 
 
 def _plot_metric_comparison(wide: pd.DataFrame, metric: str, out_path: Path) -> None:
@@ -89,6 +115,7 @@ def main() -> None:
 
     metric_frames: list[pd.DataFrame] = []
     onchain_rows: list[dict[str, Any]] = []
+    proxy_rows: list[dict[str, Any]] = []
     for episode in args.episodes:
         frame = _read_metrics_for_episode(episode, reports_root)
         if frame is not None:
@@ -96,6 +123,9 @@ def main() -> None:
         onchain = _read_onchain_snapshot(episode, reports_root)
         if onchain is not None:
             onchain_rows.append(onchain)
+        proxy = _read_proxy_coverage(episode, reports_root)
+        if proxy is not None:
+            proxy_rows.append(proxy)
 
     if not metric_frames:
         raise FileNotFoundError("No episode metrics found for selected episodes.")
@@ -119,9 +149,13 @@ def main() -> None:
     _plot_metric_comparison(wide_for_plot, "flip_rate", figures_dir / "fliprate_naive_vs_gated.png")
 
     onchain_df = pd.DataFrame(onchain_rows).sort_values("episode") if onchain_rows else pd.DataFrame()
+    proxy_df = pd.DataFrame(proxy_rows).sort_values("episode") if proxy_rows else pd.DataFrame()
     onchain_path = output_dir / "final_onchain_snapshot.csv"
     if not onchain_df.empty:
         onchain_df.to_csv(onchain_path, index=False)
+    proxy_path = output_dir / "final_proxy_coverage.csv"
+    if not proxy_df.empty:
+        proxy_df.to_csv(proxy_path, index=False)
 
     calibration_details_path = output_dir / "calibration_details.csv"
     calibration_agg_path = output_dir / "calibration_aggregate.csv"
@@ -152,6 +186,16 @@ def main() -> None:
             handle.write(onchain_df.to_string(index=False))
             handle.write("\n```\n")
 
+        if not proxy_df.empty:
+            handle.write("\n## Proxy Coverage Notes\n\n")
+            handle.write("```text\n")
+            handle.write(proxy_df.to_string(index=False))
+            handle.write("\n```\n")
+            handle.write(
+                "\nInterpretation: debiased premium is strongest when proxy_component_count > 0. "
+                "When coverage is missing, treat the episode primarily as depeg safety/on-chain validation.\n"
+            )
+
         handle.write("\n## Generated Artifacts\n\n")
         handle.write(f"- `{long_path}`\n")
         handle.write(f"- `{wide_path}`\n")
@@ -160,6 +204,8 @@ def main() -> None:
         handle.write(f"- `{figures_dir / 'fliprate_naive_vs_gated.png'}`\n")
         if not onchain_df.empty:
             handle.write(f"- `{onchain_path}`\n")
+        if not proxy_df.empty:
+            handle.write(f"- `{proxy_path}`\n")
 
         if calibration_exists:
             handle.write(f"- `{calibration_details_path}`\n")
@@ -178,4 +224,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
