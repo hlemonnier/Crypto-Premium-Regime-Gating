@@ -12,6 +12,7 @@ import requests
 
 from src.data_ingest import IngestConfig, build_processed_prices, save_processed
 from src.pipeline import export_outputs, load_config, run_pipeline
+from src.premium import resolve_target_pair
 
 
 DEFAULT_SYMBOLS = [
@@ -239,14 +240,28 @@ def main() -> None:
     premium_cfg = run_cfg.get("premium", {})
     target_usdc = premium_cfg.get("target_usdc_symbol", "BTCUSDC-PERP")
     target_usdt = premium_cfg.get("target_usdt_symbol", "BTCUSDT-PERP")
-    missing_targets = [s for s in (target_usdc, target_usdt) if s not in matrix.columns]
-    if missing_targets:
+    auto_resolve_target = bool(premium_cfg.get("auto_resolve_target_pair", True))
+    try:
+        resolved_target = resolve_target_pair(
+            matrix,
+            usdc_symbol=target_usdc,
+            usdt_symbol=target_usdt,
+            auto_resolve=auto_resolve_target,
+        )
+    except Exception as exc:
         available = ", ".join(sorted(matrix.columns))
         raise SystemExit(
-            "Target symbols unavailable for this episode on selected Binance dataset. "
-            f"Missing: {missing_targets}. Available: [{available}]. "
-            "Try a different episode/source or adjust config premium target symbols."
+            "No compatible USDC/USDT target pair available for this Binance episode. "
+            f"{exc} Available: [{available}]"
         )
+    if resolved_target != (target_usdc, target_usdt):
+        print(
+            "Target pair auto-resolved for this episode: "
+            f"{resolved_target[0]} vs {resolved_target[1]}"
+        )
+    run_cfg.setdefault("premium", {})
+    run_cfg["premium"]["target_usdc_symbol"] = resolved_target[0]
+    run_cfg["premium"]["target_usdt_symbol"] = resolved_target[1]
 
     print("Running premium pipeline...")
     results = run_pipeline(run_cfg, matrix)

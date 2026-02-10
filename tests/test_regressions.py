@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
 import pandas as pd
 
 from src.backtest import run_backtest
+from src.pipeline import load_price_matrix
 from src.premium import PremiumConfig, build_premium_frame
 from src.thresholds import quantile_threshold
 
@@ -90,6 +93,33 @@ class HitRateTests(unittest.TestCase):
         # Non-active bars should not pollute hit-rate.
         wrong_legacy = (log["net_pnl"].where(log["position"].shift(1).abs() > 0) > 0).mean()
         self.assertLess(float(wrong_legacy), float(metrics["hit_rate"]))
+
+
+class PriceMatrixLoaderTests(unittest.TestCase):
+    def test_loader_drops_nat_and_duplicate_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "matrix.csv"
+            raw = pd.DataFrame(
+                {
+                    "timestamp_utc": [
+                        "2024-01-01T00:00:00Z",
+                        "not-a-date",
+                        "2024-01-01T00:00:00Z",
+                        "2024-01-01T00:01:00Z",
+                    ],
+                    "BTCUSDT-PERP": [100.0, 101.0, 102.0, 103.0],
+                }
+            )
+            raw.to_csv(path, index=False)
+
+            loaded = load_price_matrix(path)
+
+            self.assertEqual(loaded.shape[0], 2)
+            self.assertFalse(loaded.index.isna().any())
+            self.assertEqual(
+                float(loaded.loc[pd.Timestamp("2024-01-01T00:00:00Z"), "BTCUSDT-PERP"]),
+                102.0,
+            )
 
 
 if __name__ == "__main__":

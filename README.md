@@ -89,6 +89,11 @@ Main pipeline input is a price matrix (parquet recommended, csv supported):
 - columns: symbols (e.g., `BTCUSDC-PERP`, `BTCUSDT-PERP`, `ETHUSDC-PERP`, ...)
 - values: price
 
+Loader safety behavior:
+
+- rows with invalid timestamps are dropped with warning
+- duplicate timestamps are deduplicated with `keep='last'` and warning
+
 Target contract handling is now auto-adaptive by default:
 
 - if configured target symbols are present, they are used directly
@@ -119,6 +124,20 @@ python -m src.pipeline --config configs/config.yaml --price-matrix data/processe
 ```
 
 If parquet engine is unavailable locally, ingestion/export falls back to csv and you can pass a `.csv` path.
+
+## Clean submission package
+
+To generate a recruiter-facing zip without local/editor/git artifacts:
+
+```bash
+./scripts/package_submission.sh
+```
+
+Optional output path:
+
+```bash
+./scripts/package_submission.sh /tmp/crypto_premium_submission.zip
+```
 
 ## One-command episode run (Binance)
 

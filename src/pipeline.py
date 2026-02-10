@@ -61,6 +61,25 @@ def load_price_matrix(path: str | Path) -> pd.DataFrame:
         if "timestamp_utc" in frame.columns:
             frame = frame.set_index("timestamp_utc")
         frame.index = pd.to_datetime(frame.index, utc=True, errors="coerce")
+    else:
+        frame.index = pd.to_datetime(frame.index, utc=True, errors="coerce")
+
+    nat_rows = int(frame.index.isna().sum())
+    if nat_rows > 0:
+        warnings.warn(
+            f"Dropping {nat_rows} rows with invalid timestamps from {matrix_path}.",
+            stacklevel=2,
+        )
+        frame = frame.loc[frame.index.notna()]
+
+    duplicated = int(frame.index.duplicated(keep="last").sum())
+    if duplicated > 0:
+        warnings.warn(
+            f"Dropping {duplicated} duplicate timestamps from {matrix_path} (keep='last').",
+            stacklevel=2,
+        )
+        frame = frame.loc[~frame.index.duplicated(keep="last")]
+
     frame = frame.sort_index()
     return frame
 
