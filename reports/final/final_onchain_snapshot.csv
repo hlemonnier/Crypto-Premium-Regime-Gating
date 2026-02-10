@@ -1,0 +1,3 @@
+episode,onchain_data_ratio,onchain_divergence_abs_mean,onchain_depeg_count,combined_depeg_count
+bybit_usdc_depeg_2023,1.0,0.03199542837430682,1436,1517
+okx_usdc_depeg_2023,1.0,0.005697539253795165,956,962

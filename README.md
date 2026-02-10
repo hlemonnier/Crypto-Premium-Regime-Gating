@@ -68,6 +68,8 @@ src/
   plots.py            # Figure 1/2/3 exports
   pipeline.py         # end-to-end runner
   tune_gating.py      # parameter tuning for regime/strategy gating
+  calibration_report.py # tuned vs baseline (Notice defaults) validation
+  presentation_pack.py  # polished final tables/figures/summary pack
 ```
 
 ## Setup
@@ -221,6 +223,34 @@ Variants included:
 - `plus_robust`
 - `plus_regime`
 - `plus_hawkes`
+
+## Final calibration and presentation polish
+
+Run calibration comparison (baseline Notice defaults vs tuned config):
+
+```bash
+python -m src.calibration_report \
+  --episodes "data/processed/episodes/*2024_binance/prices_matrix.csv" \
+  --output-dir reports/final
+```
+
+Build final polished pack (consolidated CSV + comparison figures + executive summary):
+
+```bash
+python -m src.presentation_pack --output-dir reports/final --reports-root reports
+```
+
+Main final artifacts:
+
+- `reports/final/calibration_report.md`
+- `reports/final/calibration_details.csv`
+- `reports/final/final_episode_metrics_long.csv`
+- `reports/final/final_episode_metrics_wide.csv`
+- `reports/final/final_onchain_snapshot.csv`
+- `reports/final/executive_summary.md`
+- `reports/final/figures/sharpe_naive_vs_gated.png`
+- `reports/final/figures/pnl_naive_vs_gated.png`
+- `reports/final/figures/fliprate_naive_vs_gated.png`
 
 ## Outputs
 

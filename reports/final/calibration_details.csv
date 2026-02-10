@@ -1,0 +1,4 @@
+episode,matrix_path,baseline_gated_sharpe,tuned_gated_sharpe,delta_gated_sharpe,baseline_gated_pnl_net,tuned_gated_pnl_net,delta_gated_pnl_net,baseline_gated_active_ratio,tuned_gated_active_ratio
+march_vol_2024_binance,data/processed/episodes/march_vol_2024_binance/prices_matrix.csv,-12.766979919677185,33.12586307934999,45.892842999027174,-0.00020979428245664305,0.001224040876704093,0.001433835159160736,0.001736111111111111,0.10347222222222222
+yen_followthrough_2024_binance,data/processed/episodes/yen_followthrough_2024_binance/prices_matrix.csv,0.0,9.02363603232526,9.02363603232526,0.0,-0.0017389124612099353,-0.0017389124612099353,0.0,0.26840277777777777
+yen_unwind_2024_binance,data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv,-239.41473427287085,12.040132578660002,251.45486685153085,-0.0011732961680977808,0.0010086768543715202,0.002181973022469301,0.0045138888888888885,0.4652777777777778
