@@ -12,6 +12,7 @@ This project combines:
 - Stable coin analysis:
   - fair-value proxy of `USDT/USDC` spread via cross-asset replication
   - depeg detection flag (`delta_log`, consecutive windows)
+  - dedicated on-chain validation feed (`onchain_proxy` from DefiLlama)
   - transmission into synthetic premium (`BTCUSDC` vs `BTCUSDT`)
 - Premium analysis (robust estimation):
   - naive premium failure handling
@@ -55,6 +56,7 @@ src/
   binance_data.py     # Binance episode loader (spot/futures)
   bybit_data.py       # Bybit kline loader (spot/linear)
   okx_data.py         # OKX trade-archive loader (futures contracts)
+  onchain.py          # on-chain validation (DefiLlama stablecoin prices)
   premium.py          # p_naive, stablecoin proxy, debiased p, depeg flag
   robust_filter.py    # p_smooth, sigma_hat, z_t, events
   statmech.py         # H_t, T_t, chi_t
@@ -62,6 +64,7 @@ src/
   hawkes.py           # optional rolling Hawkes fit + n(t)
   strategy.py         # Trade/Widen/Risk-off decision logic
   backtest.py         # naive vs gated backtest + metrics
+  ablation_report.py  # single-command ablation ladder report
   plots.py            # Figure 1/2/3 exports
   pipeline.py         # end-to-end runner
   tune_gating.py      # parameter tuning for regime/strategy gating
@@ -177,6 +180,47 @@ Latest tuned defaults now set in `configs/config.yaml`:
 - `strategy.chi_widen_quantile: 0.99`
 - `regimes.stress_quantile: 0.9`
 - `regimes.recovery_quantile: 0.8`
+
+## On-chain validation feed
+
+`src.pipeline` now integrates an on-chain validation frame from DefiLlama:
+
+- `onchain_usdc_price`
+- `onchain_usdt_price`
+- `onchain_proxy`
+- `onchain_divergence`
+- `onchain_depeg_flag`
+
+`depeg_flag` used by strategy is now the safety union:
+
+- market-implied depeg flag from premium proxy
+- on-chain depeg flag from DefiLlama prices
+
+Configuration lives under `onchain:` in `configs/config.yaml`.
+
+## Ablation report (single script)
+
+Run the full ablation ladder:
+
+```bash
+python -m src.ablation_report \
+  --price-matrix data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv \
+  --output-dir reports/tables
+```
+
+Artifacts:
+
+- `reports/tables/ablation_metrics.csv`
+- `reports/tables/ablation_trade_log_<variant>.csv`
+- `reports/tables/ablation_summary.md`
+
+Variants included:
+
+- `naive`
+- `debias_only`
+- `plus_robust`
+- `plus_regime`
+- `plus_hawkes`
 
 ## Outputs
 

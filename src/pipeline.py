@@ -4,12 +4,14 @@ import argparse
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
+import warnings
 
 import pandas as pd
 import yaml
 
 from src.backtest import BacktestConfig, compare_strategies, export_metrics
 from src.hawkes import HawkesConfig, estimate_hawkes_rolling
+from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.plots import (
     PlotConfig,
     plot_figure_1_timeline,
@@ -78,6 +80,25 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
         proxy_pairs=proxy_pairs,
     )
 
+    onchain_cfg = _build_dataclass(OnchainConfig, config.get("onchain"))
+    if onchain_cfg.enabled:
+        try:
+            onchain_frame = build_onchain_validation_frame(
+                index=premium_frame.index,
+                stablecoin_proxy=premium_frame["stablecoin_proxy"],
+                cfg=onchain_cfg,
+            )
+        except Exception as exc:
+            warnings.warn(f"On-chain validation failed, continuing without it: {exc}")
+            onchain_frame = empty_onchain_frame(premium_frame.index)
+    else:
+        onchain_frame = empty_onchain_frame(premium_frame.index)
+
+    # Safety override integrates both market-implied and on-chain depeg detection.
+    premium_frame["depeg_flag"] = (
+        premium_frame["depeg_flag"].astype(bool) | onchain_frame["onchain_depeg_flag"].astype(bool)
+    )
+
     robust_cfg = _build_dataclass(RobustFilterConfig, config.get("robust_filter"))
     robust_frame = build_robust_frame(premium_frame["p"], cfg=robust_cfg, freq=freq)
 
@@ -114,7 +135,7 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     )
 
     signal_frame = pd.concat(
-        [premium_frame, robust_frame, m_t, state_frame, regime_frame, hawkes_frame, decision_frame],
+        [premium_frame, onchain_frame, robust_frame, m_t, state_frame, regime_frame, hawkes_frame, decision_frame],
         axis=1,
     )
     signal_frame = signal_frame.loc[~signal_frame.index.duplicated(keep="last")]

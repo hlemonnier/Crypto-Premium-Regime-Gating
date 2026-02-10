@@ -23,6 +23,18 @@ premium:
     - SOLUSDT-PERP
   - - BNBUSDC-PERP
     - BNBUSDT-PERP
+onchain:
+  enabled: true
+  provider: defillama
+  stablecoin_prices_url: https://stablecoins.llama.fi/stablecoinprices
+  usdc_key: usd-coin
+  usdt_key: tether
+  cache_path: data/processed/onchain/defillama_stablecoinprices.csv
+  cache_max_age_hours: 24
+  request_timeout_sec: 40
+  depeg_delta_log: 0.001
+  depeg_min_consecutive: 5
+  divergence_alert_log: 0.001
 robust_filter:
   window: 1h
   z_threshold: 3.0
