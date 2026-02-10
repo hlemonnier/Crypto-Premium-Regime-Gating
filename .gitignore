@@ -1,3 +1,13 @@
 Notice.pdf
 Notice + Hawkes.pdf
 .DS_Store
+AGENT.md
+.venv/
+__pycache__/
+*.pyc
+.idea/
+reports/figures/
+reports/tables/
+reports/episodes/
+data/raw/
+data/processed/

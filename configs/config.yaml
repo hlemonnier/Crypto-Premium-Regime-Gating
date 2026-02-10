@@ -1,0 +1,65 @@
+project:
+  name: Crypto Premium Regime Gating
+  version: v5
+data:
+  resample_rule: 1min
+  ffill_limit: 2
+  price_matrix_path: data/processed/prices_matrix.parquet
+data_sources:
+  binance: https://data.binance.vision/?prefix=data/
+  gateio: https://www.gate.com/developer/historical_quotes
+  bybit: https://www.bybit.com/derivatives/en/history-data
+  okx_trades_template: https://www.okx.com/cdn/okex/traderecords/trades/monthly/YYYYMM/allfuture-trades-YYYY-MM-DD.zip
+  okx_funding_template: https://www.okx.com/cdn/okex/traderecords/swaprate/monthly/YYYYMM/allswaprate-swaprate-YYYY-MM-DD.zip
+premium:
+  target_usdc_symbol: BTCUSDC-PERP
+  target_usdt_symbol: BTCUSDT-PERP
+  depeg_delta_log: 0.002
+  depeg_min_consecutive: 5
+  proxy_pairs:
+  - - ETHUSDC-PERP
+    - ETHUSDT-PERP
+  - - SOLUSDC-PERP
+    - SOLUSDT-PERP
+  - - BNBUSDC-PERP
+    - BNBUSDT-PERP
+robust_filter:
+  window: 1h
+  z_threshold: 3.0
+  sigma_floor: 1.0e-06
+  min_period_fraction: 0.25
+statmech:
+  window: 1h
+  entropy_bins: 17
+  entropy_clip: 6.0
+  min_period_fraction: 0.25
+regimes:
+  weight_temperature: 0.45
+  weight_susceptibility: 0.45
+  weight_entropy: 0.1
+  smooth_span: 60
+  cp_window: 30
+  stress_quantile: 0.9
+  recovery_quantile: 0.8
+  cp_quantile: 0.9
+hawkes:
+  enabled: false
+  warmup: 48h
+  rolling_window: 12h
+  refit_interval: 30min
+  stability_epsilon: 0.01
+  min_events_for_fit: 20
+strategy:
+  entry_k: 0.5
+  t_widen_quantile: 0.99
+  chi_widen_quantile: 0.99
+  hawkes_widen_threshold: 0.7
+  hawkes_risk_off_threshold: 0.85
+backtest:
+  cost_bps: 1.0
+  naive_threshold: 0.001
+outputs:
+  tables_dir: reports/tables
+  figures_dir: reports/figures
+plots:
+  dpi: 150
