@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
+
+from src.thresholds import quantile_threshold
 
 
 @dataclass(frozen=True)
@@ -11,6 +12,9 @@ class StrategyConfig:
     entry_k: float = 2.0
     t_widen_quantile: float = 0.80
     chi_widen_quantile: float = 0.80
+    threshold_mode: str = "expanding"
+    threshold_min_periods: int = 120
+    threshold_window: int | None = None
     hawkes_widen_threshold: float = 0.70
     hawkes_risk_off_threshold: float = 0.85
 
@@ -21,10 +25,30 @@ def compute_widen_flag(
     *,
     t_quantile: float = 0.80,
     chi_quantile: float = 0.80,
-) -> pd.Series:
-    t_thr = float(T_t.quantile(t_quantile))
-    chi_thr = float(chi_t.quantile(chi_quantile))
-    return (T_t.ge(t_thr) | chi_t.ge(chi_thr)).rename("widen_flag")
+    threshold_mode: str = "expanding",
+    threshold_min_periods: int = 120,
+    threshold_window: int | None = None,
+) -> pd.DataFrame:
+    t_thr = quantile_threshold(
+        T_t,
+        t_quantile,
+        mode=threshold_mode,
+        min_periods=threshold_min_periods,
+        window=threshold_window,
+        shift=1,
+        name="t_widen_threshold",
+    )
+    chi_thr = quantile_threshold(
+        chi_t,
+        chi_quantile,
+        mode=threshold_mode,
+        min_periods=threshold_min_periods,
+        window=threshold_window,
+        shift=1,
+        name="chi_widen_threshold",
+    )
+    widen_flag = (T_t.ge(t_thr) | chi_t.ge(chi_thr)).fillna(False).rename("widen_flag")
+    return pd.concat([t_thr, chi_thr, widen_flag], axis=1)
 
 
 def build_decisions(
@@ -38,12 +62,16 @@ def build_decisions(
     n_t: pd.Series | None = None,
     cfg: StrategyConfig,
 ) -> pd.DataFrame:
-    widen_flag = compute_widen_flag(
+    widen_frame = compute_widen_flag(
         T_t,
         chi_t,
         t_quantile=cfg.t_widen_quantile,
         chi_quantile=cfg.chi_widen_quantile,
+        threshold_mode=cfg.threshold_mode,
+        threshold_min_periods=cfg.threshold_min_periods,
+        threshold_window=cfg.threshold_window,
     )
+    widen_flag = widen_frame["widen_flag"].astype(bool)
     if sigma_hat is not None:
         entry_threshold = (cfg.entry_k * T_t * sigma_hat).rename("entry_threshold")
     else:
@@ -76,7 +104,7 @@ def build_decisions(
     return pd.concat(
         [
             entry_threshold,
-            widen_flag,
+            widen_frame,
             trade_signal.rename("trade_signal"),
             decision,
             side,

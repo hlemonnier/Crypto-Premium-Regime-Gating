@@ -135,6 +135,11 @@ def main() -> None:
         premium_frame["p_naive"],
         freq=freq,
         cost_bps=backtest_cfg.cost_bps,
+        position_mode=backtest_cfg.position_mode,
+        exit_on_widen=backtest_cfg.exit_on_widen,
+        exit_on_mean_reversion=backtest_cfg.exit_on_mean_reversion,
+        min_holding_bars=backtest_cfg.min_holding_bars,
+        max_holding_bars=backtest_cfg.max_holding_bars,
     )
     metrics_rows.append({"variant": "naive", **naive_metrics})
     logs["naive"] = naive_log
@@ -150,6 +155,11 @@ def main() -> None:
         premium_frame["p"],
         freq=freq,
         cost_bps=backtest_cfg.cost_bps,
+        position_mode=backtest_cfg.position_mode,
+        exit_on_widen=backtest_cfg.exit_on_widen,
+        exit_on_mean_reversion=backtest_cfg.exit_on_mean_reversion,
+        min_holding_bars=backtest_cfg.min_holding_bars,
+        max_holding_bars=backtest_cfg.max_holding_bars,
     )
     metrics_rows.append({"variant": "debias_only", **debias_metrics})
     logs["debias_only"] = debias_log
@@ -166,6 +176,11 @@ def main() -> None:
         robust_frame["p_smooth"],
         freq=freq,
         cost_bps=backtest_cfg.cost_bps,
+        position_mode=backtest_cfg.position_mode,
+        exit_on_widen=backtest_cfg.exit_on_widen,
+        exit_on_mean_reversion=backtest_cfg.exit_on_mean_reversion,
+        min_holding_bars=backtest_cfg.min_holding_bars,
+        max_holding_bars=backtest_cfg.max_holding_bars,
     )
     metrics_rows.append({"variant": "plus_robust", **robust_metrics})
     logs["plus_robust"] = robust_log
@@ -186,6 +201,11 @@ def main() -> None:
         m_t,
         freq=freq,
         cost_bps=backtest_cfg.cost_bps,
+        position_mode=backtest_cfg.position_mode,
+        exit_on_widen=backtest_cfg.exit_on_widen,
+        exit_on_mean_reversion=backtest_cfg.exit_on_mean_reversion,
+        min_holding_bars=backtest_cfg.min_holding_bars,
+        max_holding_bars=backtest_cfg.max_holding_bars,
     )
     metrics_rows.append({"variant": "plus_regime", **regime_metrics})
     logs["plus_regime"] = regime_log
@@ -217,6 +237,11 @@ def main() -> None:
             m_t,
             freq=freq,
             cost_bps=backtest_cfg.cost_bps,
+            position_mode=backtest_cfg.position_mode,
+            exit_on_widen=backtest_cfg.exit_on_widen,
+            exit_on_mean_reversion=backtest_cfg.exit_on_mean_reversion,
+            min_holding_bars=backtest_cfg.min_holding_bars,
+            max_holding_bars=backtest_cfg.max_holding_bars,
         )
         metrics_rows.append({"variant": "plus_hawkes", **hawkes_metrics})
         logs["plus_hawkes"] = hawkes_log

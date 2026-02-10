@@ -180,8 +180,15 @@ Latest tuned defaults now set in `configs/config.yaml`:
 - `strategy.entry_k: 0.5`
 - `strategy.t_widen_quantile: 0.99`
 - `strategy.chi_widen_quantile: 0.99`
+- `strategy.threshold_mode: expanding` (causal quantiles)
 - `regimes.stress_quantile: 0.9`
 - `regimes.recovery_quantile: 0.8`
+- `regimes.threshold_mode: expanding` (causal quantiles)
+
+If you need to reproduce legacy static-threshold behavior, switch both to:
+
+- `strategy.threshold_mode: fixed`
+- `regimes.threshold_mode: fixed`
 
 ## On-chain validation feed
 
@@ -262,6 +269,9 @@ Main final artifacts:
 - `reports/figures/figure_2_panel.png`
 - `reports/figures/figure_3_phase_space.png`
 
+Metric convention in `metrics.csv`:
+- `hit_rate` is computed only on active position bars (`position[t-1] != 0`).
+
 ## Decision policy implemented
 
 Priority order:
@@ -274,6 +284,13 @@ Priority order:
 4. Else transient mode:
    - `Trade` only if `|m_t| > k * T_t * sigma_hat` (unit-consistent implementation)
    - `Widen` when high `T_t` or `chi_t`
+
+Backtest execution policy (default):
+- `position_mode: stateful` (multi-bar holding)
+- enter on `Trade` with side from `sign(m_t)`
+- hold at least `min_holding_bars` after entry, then exit on `Widen`
+- exit immediately on `Risk-off` or mean-reversion (`m_t` crossing 0 versus held side)
+- turnover/costs include entries, exits, and flips (`|Δposition|`)
 
 ## Fixed episodes to evaluate
 

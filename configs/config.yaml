@@ -54,6 +54,8 @@ regimes:
   stress_quantile: 0.9
   recovery_quantile: 0.8
   cp_quantile: 0.9
+  threshold_mode: expanding
+  threshold_min_periods: 120
 hawkes:
   enabled: false
   warmup: 48h
@@ -65,11 +67,18 @@ strategy:
   entry_k: 0.5
   t_widen_quantile: 0.99
   chi_widen_quantile: 0.99
+  threshold_mode: expanding
+  threshold_min_periods: 120
   hawkes_widen_threshold: 0.7
   hawkes_risk_off_threshold: 0.85
 backtest:
   cost_bps: 1.0
   naive_threshold: 0.001
+  position_mode: stateful
+  exit_on_widen: true
+  exit_on_mean_reversion: true
+  min_holding_bars: 5
+  max_holding_bars:
 outputs:
   tables_dir: reports/tables
   figures_dir: reports/figures

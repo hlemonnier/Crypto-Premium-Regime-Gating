@@ -130,10 +130,24 @@ def plot_figure_3_phase_space(
         y_col = "abs_m_t"
         frame = frame.copy()
         frame[y_col] = frame["m_t"].abs()
+        if "sigma_hat" in frame.columns and frame["sigma_hat"].notna().any():
+            frame["entry_boundary"] = entry_k * frame["T_t"] * frame["sigma_hat"]
+            boundary_label = "|m|=k*T*sigma_hat"
+        else:
+            frame["entry_boundary"] = entry_k * frame["T_t"]
+            boundary_label = "|m|=k*T"
         ax.set_ylabel("|m_t|")
         ax.set_title("Figure 3 - Phase Space (T_t, |m_t|)")
-        x_grid = np.linspace(frame["T_t"].quantile(0.01), frame["T_t"].quantile(0.99), 100)
-        ax.plot(x_grid, entry_k * x_grid, color="#003f5c", linestyle="--", linewidth=1.0, label="|m|=k*T")
+        boundary = frame[["T_t", "entry_boundary"]].dropna().sort_values("T_t")
+        if not boundary.empty:
+            ax.plot(
+                boundary["T_t"],
+                boundary["entry_boundary"],
+                color="#003f5c",
+                linestyle="--",
+                linewidth=1.0,
+                label=boundary_label,
+            )
 
     for decision, color in DECISION_COLORS.items():
         subset = frame[frame["decision"] == decision]
