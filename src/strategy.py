@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 
 import pandas as pd
 
@@ -100,6 +101,14 @@ def build_decisions(
         hawkes_widen = (~riskoff) & n_t.ge(cfg.hawkes_widen_threshold)
         decision.loc[hawkes_widen] = "Widen"
         side.loc[hawkes_widen] = "Flat"
+
+    trade_count = int(trade.sum())
+    if trade_count == 0 and m_t.notna().any():
+        warnings.warn(
+            "No Trade decisions were generated for this run (all bars gated to Widen/Risk-off). "
+            "Review entry_k and widen quantiles if this is unintended.",
+            stacklevel=2,
+        )
 
     return pd.concat(
         [

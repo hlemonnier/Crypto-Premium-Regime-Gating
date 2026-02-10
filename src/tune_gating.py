@@ -122,6 +122,22 @@ def resolve_episode_files(patterns: list[str]) -> list[Path]:
     return deduped
 
 
+def filter_compatible_matrices(
+    base_config: dict,
+    matrices: dict[str, pd.DataFrame],
+) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    compatible: dict[str, pd.DataFrame] = {}
+    skipped: dict[str, str] = {}
+    for path, matrix in matrices.items():
+        try:
+            run_pipeline(base_config, matrix)
+        except Exception as exc:
+            skipped[path] = str(exc).replace("\n", " ")
+            continue
+        compatible[path] = matrix
+    return compatible, skipped
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune regime gating parameters on 2024 episodes.")
     parser.add_argument("--config", default="configs/config.yaml", help="Config path.")
@@ -157,6 +173,17 @@ def main() -> None:
     files = resolve_episode_files(args.episodes)
     matrices: dict[str, pd.DataFrame] = {str(path): load_price_matrix(path) for path in files}
     print("Loaded episodes:")
+    for path, matrix in matrices.items():
+        print(f"- {path}: {matrix.shape}")
+
+    matrices, skipped = filter_compatible_matrices(base_config, matrices)
+    if skipped:
+        print("Skipped incompatible episodes:")
+        for path, reason in skipped.items():
+            print(f"- {path}: {reason}")
+    if not matrices:
+        raise RuntimeError("No compatible episodes available after symbol coverage checks.")
+    print("Episodes kept for tuning:")
     for path, matrix in matrices.items():
         print(f"- {path}: {matrix.shape}")
 

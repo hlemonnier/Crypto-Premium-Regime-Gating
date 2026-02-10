@@ -1,0 +1,3 @@
+episode,matrix_path,reason
+usdc_depeg_2023,data/processed/episodes/usdc_depeg_2023/prices_matrix.csv,"No compatible USDC/USDT target pair found in price matrix. Expected a matched pair like BTCUSDC/BTCUSDT for the same market suffix. Configured target=('BTCUSDC-PERP', 'BTCUSDT-PERP'), available columns=[BNBUSDT-PERP, BTCUSDT-PERP, ETHUSDT-PERP, SOLUSDT-PERP]"
+usdc_depeg_2023_spot,data/processed/episodes/usdc_depeg_2023_spot/prices_matrix.csv,"No compatible USDC/USDT target pair found in price matrix. Expected a matched pair like BTCUSDC/BTCUSDT for the same market suffix. Configured target=('BTCUSDC-PERP', 'BTCUSDT-PERP'), available columns=[BNBUSDT-PERP, BTCUSDT-PERP, ETHUSDT-PERP, SOLUSDT-PERP]"

@@ -89,6 +89,12 @@ Main pipeline input is a price matrix (parquet recommended, csv supported):
 - columns: symbols (e.g., `BTCUSDC-PERP`, `BTCUSDT-PERP`, `ETHUSDC-PERP`, ...)
 - values: price
 
+Target contract handling is now auto-adaptive by default:
+
+- if configured target symbols are present, they are used directly
+- if not, pipeline auto-selects the closest available USDC/USDT pair (same root/suffix preference, e.g. `BTCUSDC-SPOT` + `BTCUSDT-SPOT`)
+- if no compatible USDC/USDT target pair exists, pipeline fails with an explicit data-contract error
+
 If you start from raw files, use functions from `src/data_ingest.py` to normalize and build this matrix.
 
 CLI option:
@@ -189,6 +195,8 @@ If you need to reproduce legacy static-threshold behavior, switch both to:
 
 - `strategy.threshold_mode: fixed`
 - `regimes.threshold_mode: fixed`
+
+`fixed` mode is causal: it calibrates once on the initial window (no full-series quantile look-ahead).
 
 ## On-chain validation feed
 

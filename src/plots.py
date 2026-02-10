@@ -130,7 +130,10 @@ def plot_figure_3_phase_space(
         y_col = "abs_m_t"
         frame = frame.copy()
         frame[y_col] = frame["m_t"].abs()
-        if "sigma_hat" in frame.columns and frame["sigma_hat"].notna().any():
+        if "entry_threshold" in frame.columns and frame["entry_threshold"].notna().any():
+            frame["entry_boundary"] = pd.to_numeric(frame["entry_threshold"], errors="coerce")
+            boundary_label = "entry_threshold"
+        elif "sigma_hat" in frame.columns and frame["sigma_hat"].notna().any():
             frame["entry_boundary"] = entry_k * frame["T_t"] * frame["sigma_hat"]
             boundary_label = "|m|=k*T*sigma_hat"
         else:

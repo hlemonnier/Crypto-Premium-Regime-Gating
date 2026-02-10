@@ -1,3 +1,6 @@
 episode,onchain_data_ratio,onchain_divergence_abs_mean,onchain_depeg_count,combined_depeg_count
 bybit_usdc_depeg_2023,1.0,0.03199542837430682,1436,1517
-okx_usdc_depeg_2023,1.0,0.005697539253795165,956,962
+march_vol_2024_binance,1.0,0.00042238404885550784,1436,1436
+okx_usdc_depeg_2023,1.0,0.005697539253795168,956,962
+yen_followthrough_2024_binance,1.0,0.0006059431584166721,0,0
+yen_unwind_2024_binance,1.0,0.0006878676922997501,0,0

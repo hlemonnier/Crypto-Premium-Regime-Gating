@@ -14,6 +14,9 @@ data_sources:
 premium:
   target_usdc_symbol: BTCUSDC-PERP
   target_usdt_symbol: BTCUSDT-PERP
+  auto_resolve_target_pair: true
+  allow_target_pair_as_proxy: false
+  fail_on_missing_proxy: true
   depeg_delta_log: 0.002
   depeg_min_consecutive: 5
   proxy_pairs:
@@ -63,6 +66,10 @@ hawkes:
   refit_interval: 30min
   stability_epsilon: 0.01
   min_events_for_fit: 20
+  auto_warmup_fraction: 0.35
+  auto_min_warmup: 4h
+  auto_adjust_min_events: true
+  auto_min_events_floor: 5
 strategy:
   entry_k: 0.5
   t_widen_quantile: 0.99

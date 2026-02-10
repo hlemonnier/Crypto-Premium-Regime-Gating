@@ -199,13 +199,20 @@ def run_backtest(
     out.index.name = "timestamp_utc"
 
     in_market = pos.shift(1).abs() > 0
-    pnl_when_active = net_pnl.loc[in_market].dropna()
+    active_mask = in_market & net_pnl.notna()
+    pnl_when_active = net_pnl.loc[active_mask]
     active_std = float(pnl_when_active.std(ddof=0)) if not pnl_when_active.empty else 0.0
     annualization = np.sqrt(periods_per_year_from_freq(freq))
 
     sharpe = float((pnl_when_active.mean() / active_std) * annualization) if active_std > 0 else 0.0
     hit_rate = float((pnl_when_active > 0).mean()) if not pnl_when_active.empty else 0.0
-    flip_rate = float(decision.ne(decision.shift(1)).mean())
+    decision_flip = decision.ne(decision.shift(1))
+    if not decision_flip.empty:
+        decision_flip.iloc[0] = False
+    position_flip = pos.ne(pos.shift(1))
+    if not position_flip.empty:
+        position_flip.iloc[0] = False
+    flip_rate = float(decision_flip.mean())
 
     avg_holding = float(position_frame["holding_bars"].replace(0, np.nan).mean())
     if not np.isfinite(avg_holding):
@@ -219,7 +226,7 @@ def run_backtest(
         "flip_rate": flip_rate,
         "hit_rate": hit_rate,
         "active_ratio": float(in_market.mean()),
-        "position_flip_rate": float(pos.ne(pos.shift(1)).mean()),
+        "position_flip_rate": float(position_flip.mean()),
         "avg_holding_bars": avg_holding,
     }
     return out, metrics

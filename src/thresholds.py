@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -27,8 +28,17 @@ def quantile_threshold(
     out_name = name or f"{series.name or 'series'}_q{quantile:.3f}"
 
     if mode == "fixed":
-        value = float(values.quantile(quantile))
-        return pd.Series(value, index=values.index, name=out_name, dtype=float)
+        calibration_size = max(2, int(window) if window is not None else int(min_periods))
+        threshold = pd.Series(np.nan, index=values.index, dtype="float64")
+        finite = values.dropna()
+        if finite.shape[0] < calibration_size:
+            return threshold.rename(out_name)
+        calib_end = finite.index[calibration_size - 1]
+        value = float(values.loc[:calib_end].dropna().quantile(quantile))
+        threshold.loc[threshold.index >= calib_end] = value
+        if shift > 0:
+            threshold = threshold.shift(int(shift))
+        return threshold.rename(out_name)
 
     min_periods = max(2, int(min_periods))
     if mode == "expanding":

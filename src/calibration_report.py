@@ -75,13 +75,26 @@ def main() -> None:
 
     files = resolve_episode_files(args.episodes)
     rows: list[dict[str, Any]] = []
+    skipped_rows: list[dict[str, str]] = []
 
     for matrix_path in files:
         matrix = load_price_matrix(matrix_path)
         episode = _derive_episode_name(matrix_path)
 
-        tuned = run_pipeline(tuned_cfg, matrix)["metrics"]
-        base = run_pipeline(baseline_cfg, matrix)["metrics"]
+        try:
+            tuned = run_pipeline(tuned_cfg, matrix)["metrics"]
+            base = run_pipeline(baseline_cfg, matrix)["metrics"]
+        except Exception as exc:
+            reason = str(exc).replace("\n", " ")
+            skipped_rows.append(
+                {
+                    "episode": episode,
+                    "matrix_path": str(matrix_path),
+                    "reason": reason,
+                }
+            )
+            print(f"Skipping incompatible episode {episode}: {reason}")
+            continue
 
         tuned_g = tuned.loc["gated"]
         base_g = base.loc["gated"]
@@ -100,6 +113,12 @@ def main() -> None:
         }
         rows.append(row)
 
+    if not rows:
+        raise RuntimeError(
+            "No compatible episodes were processed. "
+            "Check symbol coverage (USDC/USDT target pair + proxy pairs) in selected matrices."
+        )
+
     details = pd.DataFrame(rows).sort_values("episode").reset_index(drop=True)
     numeric = details.select_dtypes(include=["number"])
     aggregate = pd.DataFrame(
@@ -116,9 +135,12 @@ def main() -> None:
     details_path = out_dir / "calibration_details.csv"
     agg_path = out_dir / "calibration_aggregate.csv"
     md_path = out_dir / "calibration_report.md"
+    skipped_path = out_dir / "calibration_skipped.csv"
 
     details.to_csv(details_path, index=False)
     aggregate.to_csv(agg_path, index=True)
+    if skipped_rows:
+        pd.DataFrame(skipped_rows).to_csv(skipped_path, index=False)
 
     tuned_params = {
         "strategy.entry_k": tuned_cfg.get("strategy", {}).get("entry_k"),
@@ -142,13 +164,20 @@ def main() -> None:
         handle.write("```text\n")
         handle.write(aggregate.to_string())
         handle.write("\n```\n")
+        if skipped_rows:
+            skipped_df = pd.DataFrame(skipped_rows).sort_values("episode").reset_index(drop=True)
+            handle.write("\n## Skipped Episodes\n\n")
+            handle.write("```text\n")
+            handle.write(skipped_df.to_string(index=False))
+            handle.write("\n```\n")
 
     print("Calibration report completed.")
     print(f"- details: {details_path}")
     print(f"- aggregate: {agg_path}")
     print(f"- markdown: {md_path}")
+    if skipped_rows:
+        print(f"- skipped: {skipped_path}")
 
 
 if __name__ == "__main__":
     main()
-

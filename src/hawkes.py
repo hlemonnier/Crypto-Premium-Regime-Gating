@@ -15,6 +15,10 @@ class HawkesConfig:
     refit_interval: str = "30min"
     stability_epsilon: float = 0.01
     min_events_for_fit: int = 20
+    auto_warmup_fraction: float = 0.35
+    auto_min_warmup: str = "4h"
+    auto_adjust_min_events: bool = True
+    auto_min_events_floor: int = 5
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,22 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
     warmup = pd.to_timedelta(cfg.warmup)
     rolling_window = pd.to_timedelta(cfg.rolling_window)
     refit = pd.to_timedelta(cfg.refit_interval)
+    total_span = index[-1] - index[0]
+
+    if total_span > pd.Timedelta(0):
+        fraction = float(np.clip(cfg.auto_warmup_fraction, 0.0, 1.0))
+        warmup_cap = total_span * fraction
+        warmup_floor = min(pd.to_timedelta(cfg.auto_min_warmup), total_span)
+        if warmup_cap > pd.Timedelta(0):
+            warmup = min(warmup, warmup_cap)
+        warmup = max(warmup, warmup_floor)
+        warmup = min(warmup, total_span)
+        rolling_window = min(rolling_window, total_span)
+
+    if rolling_window <= pd.Timedelta(0):
+        rolling_window = pd.to_timedelta("1min")
+    if refit <= pd.Timedelta(0):
+        refit = pd.to_timedelta("1min")
 
     lambda_t = pd.Series(np.nan, index=index, name="lambda_t")
     n_t = pd.Series(np.nan, index=index, name="n_t")
@@ -133,9 +153,24 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
     beta_t = pd.Series(np.nan, index=index, name="beta_t")
     fit_ok = pd.Series(False, index=index, name="hawkes_fit_ok")
 
+    start_time = index[0]
+    effective_min_events = max(2, int(cfg.min_events_for_fit))
+    if cfg.auto_adjust_min_events:
+        eligible_idx = event_series.index[(event_series.index - start_time) >= warmup]
+        if len(eligible_idx) > 0:
+            rolling_events = event_series.rolling(rolling_window).sum().loc[eligible_idx]
+            max_events = int(np.nanmax(rolling_events.to_numpy(dtype=float))) if not rolling_events.empty else 0
+            floor = max(2, int(cfg.auto_min_events_floor))
+            if max_events > 0:
+                effective_min_events = min(
+                    max_events,
+                    max(floor, min(effective_min_events, max_events)),
+                )
+            else:
+                effective_min_events = floor
+
     params: HawkesParams | None = None
     last_refit: pd.Timestamp | None = None
-    start_time = index[0]
 
     event_index = event_series[event_series].index
     for ts in index:
@@ -147,7 +182,7 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
             window_start = ts - rolling_window
             event_times = _window_events(event_series, window_start, ts)
             horizon = float((ts - window_start).total_seconds())
-            if event_times.size >= cfg.min_events_for_fit:
+            if event_times.size >= effective_min_events:
                 fitted = fit_exponential_hawkes(
                     event_times,
                     horizon,
