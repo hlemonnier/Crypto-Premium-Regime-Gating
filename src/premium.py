@@ -8,6 +8,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+VALID_PROXY_METHODS = {"median", "pw_rolling"}
+
 
 @dataclass(frozen=True)
 class PremiumConfig:
@@ -19,6 +21,11 @@ class PremiumConfig:
     auto_resolve_target_pair: bool = True
     allow_target_pair_as_proxy: bool = False
     fail_on_missing_proxy: bool = True
+    proxy_method: str = "median"
+    pw_window: str = "12h"
+    pw_min_period_fraction: float = 0.5
+    pw_rho_clip: float = 0.98
+    pw_fallback_to_median: bool = True
 
 
 def compute_naive_premium(
@@ -132,6 +139,102 @@ def resolve_target_pair(
     return best_pair
 
 
+def _resolve_freq_timedelta(index: pd.Index, *, freq: str | None) -> pd.Timedelta:
+    if freq is not None:
+        freq_td = pd.to_timedelta(freq)
+        if freq_td <= pd.Timedelta(0):
+            raise ValueError(f"freq must be positive, got {freq!r}")
+        return freq_td
+
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        raise ValueError(
+            "pw_rolling proxy requires either `freq` or a DatetimeIndex with at least 2 rows."
+        )
+    deltas = index.to_series().diff().dropna()
+    positive = deltas[deltas > pd.Timedelta(0)]
+    if positive.empty:
+        raise ValueError(
+            "Could not infer positive sampling frequency from index for pw_rolling proxy."
+        )
+    return positive.median()
+
+
+def _window_to_observations(window: str, freq_td: pd.Timedelta) -> int:
+    window_td = pd.to_timedelta(window)
+    if window_td <= pd.Timedelta(0):
+        raise ValueError(f"pw_window must be positive, got {window!r}")
+    obs = int(np.ceil(window_td / freq_td))
+    return max(obs, 2)
+
+
+def _estimate_ar1_rho(values: np.ndarray, *, rho_clip: float) -> float:
+    if values.size < 3:
+        return 0.0
+    centered = values - float(np.mean(values))
+    lag = centered[:-1]
+    den = float(np.dot(lag, lag))
+    if den <= 1e-20:
+        return 0.0
+    rho = float(np.dot(centered[1:], lag) / den)
+    if not np.isfinite(rho):
+        return 0.0
+    clip = float(np.clip(abs(rho_clip), 1e-6, 0.999))
+    return float(np.clip(rho, -clip, clip))
+
+
+def _prais_winsten_intercept(values: np.ndarray, *, rho: float) -> float:
+    if values.size == 0:
+        return np.nan
+    if values.size == 1:
+        return float(values[0])
+
+    r = float(np.clip(rho, -0.999, 0.999))
+    gamma_sq = max(1.0 - (r * r), 0.0)
+    gamma = float(np.sqrt(gamma_sq))
+
+    x_star = np.ones_like(values, dtype=float)
+    x_star[0] = gamma
+    y_star = values.astype(float).copy()
+    y_star[0] = gamma * y_star[0]
+    y_star[1:] = values[1:] - (r * values[:-1])
+    x_star[1:] = 1.0 - r
+
+    den = float(np.dot(x_star, x_star))
+    if den <= 1e-20:
+        return float(np.nanmedian(values))
+    return float(np.dot(x_star, y_star) / den)
+
+
+def _rolling_pw_location(
+    series: pd.Series,
+    *,
+    window_obs: int,
+    min_periods: int,
+    rho_clip: float,
+    fallback_to_current: bool,
+) -> pd.Series:
+    values = series.to_numpy(dtype=float)
+    out = np.full(values.shape, np.nan, dtype=float)
+
+    for i in range(values.shape[0]):
+        start = max(0, i - window_obs + 1)
+        window = values[start : i + 1]
+        finite = window[np.isfinite(window)]
+        if finite.size < min_periods:
+            if fallback_to_current and np.isfinite(values[i]):
+                out[i] = values[i]
+            continue
+
+        rho = _estimate_ar1_rho(finite, rho_clip=rho_clip)
+        mu_hat = _prais_winsten_intercept(finite, rho=rho)
+        if np.isfinite(mu_hat):
+            out[i] = mu_hat
+        elif fallback_to_current and np.isfinite(values[i]):
+            out[i] = values[i]
+
+    return pd.Series(out, index=series.index, name="stablecoin_proxy")
+
+
 def compute_stablecoin_proxy(
     price_matrix: pd.DataFrame,
     *,
@@ -140,7 +243,18 @@ def compute_stablecoin_proxy(
     min_price: float = 1e-12,
     allow_target_pair_fallback: bool = False,
     fail_on_missing_proxy: bool = True,
+    proxy_method: str = "median",
+    freq: str | None = None,
+    pw_window: str = "12h",
+    pw_min_period_fraction: float = 0.5,
+    pw_rho_clip: float = 0.98,
+    pw_fallback_to_median: bool = True,
 ) -> tuple[pd.Series, pd.DataFrame]:
+    method = str(proxy_method).strip().lower()
+    if method not in VALID_PROXY_METHODS:
+        raise ValueError(
+            f"Unsupported proxy_method={proxy_method!r}. Expected one of {sorted(VALID_PROXY_METHODS)}."
+        )
     pairs = list(proxy_pairs) if proxy_pairs is not None else infer_cross_asset_pairs(
         price_matrix.columns, exclude=target_pair
     )
@@ -187,7 +301,24 @@ def compute_stablecoin_proxy(
         return stablecoin_proxy, pd.DataFrame(index=price_matrix.index)
 
     proxy_components = pd.DataFrame(components, index=price_matrix.index)
-    stablecoin_proxy = proxy_components.median(axis=1, skipna=True).rename("stablecoin_proxy")
+    median_proxy = proxy_components.median(axis=1, skipna=True).rename("stablecoin_proxy")
+
+    if method == "median":
+        stablecoin_proxy = median_proxy
+    else:
+        if not 0 < float(pw_min_period_fraction) <= 1:
+            raise ValueError("pw_min_period_fraction must be in (0, 1].")
+        freq_td = _resolve_freq_timedelta(price_matrix.index, freq=freq)
+        window_obs = _window_to_observations(pw_window, freq_td)
+        min_periods = max(2, int(np.ceil(window_obs * float(pw_min_period_fraction))))
+        stablecoin_proxy = _rolling_pw_location(
+            median_proxy,
+            window_obs=window_obs,
+            min_periods=min_periods,
+            rho_clip=float(pw_rho_clip),
+            fallback_to_current=bool(pw_fallback_to_median),
+        )
+
     return stablecoin_proxy, proxy_components
 
 
@@ -213,6 +344,7 @@ def build_premium_frame(
     cfg: PremiumConfig,
     *,
     proxy_pairs: Sequence[tuple[str, str]] | None = None,
+    freq: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     target_pair = resolve_target_pair(
         price_matrix,
@@ -239,6 +371,12 @@ def build_premium_frame(
         min_price=cfg.min_price,
         allow_target_pair_fallback=cfg.allow_target_pair_as_proxy,
         fail_on_missing_proxy=cfg.fail_on_missing_proxy,
+        proxy_method=cfg.proxy_method,
+        freq=freq,
+        pw_window=cfg.pw_window,
+        pw_min_period_fraction=cfg.pw_min_period_fraction,
+        pw_rho_clip=cfg.pw_rho_clip,
+        pw_fallback_to_median=cfg.pw_fallback_to_median,
     )
     if proxy_components.empty:
         warnings.warn(

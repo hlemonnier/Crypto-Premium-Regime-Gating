@@ -118,6 +118,7 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
         price_matrix,
         premium_cfg,
         proxy_pairs=proxy_pairs,
+        freq=freq,
     )
 
     onchain_cfg = _build_dataclass(OnchainConfig, config.get("onchain"))

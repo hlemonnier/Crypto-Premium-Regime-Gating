@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ from src.regimes import RegimeConfig, build_regime_frame
 from src.robust_filter import RobustFilterConfig, build_robust_frame
 from src.statmech import StatMechConfig, build_statmech_frame
 from src.strategy import StrategyConfig, build_decisions
+
+VARIANT_ORDER = ["naive", "debias_only", "plus_robust", "plus_regime", "plus_hawkes"]
 
 
 def _build_dataclass(cls: Any, data: dict[str, Any] | None) -> Any:
@@ -44,7 +47,12 @@ def _compute_core_frames(config: dict[str, Any], matrix: pd.DataFrame) -> dict[s
     premium_raw = config.get("premium", {})
     proxy_pairs_raw = premium_raw.get("proxy_pairs", [])
     proxy_pairs = [tuple(pair) for pair in proxy_pairs_raw] if proxy_pairs_raw else None
-    premium_frame, proxy_components = build_premium_frame(matrix, premium_cfg, proxy_pairs=proxy_pairs)
+    premium_frame, proxy_components = build_premium_frame(
+        matrix,
+        premium_cfg,
+        proxy_pairs=proxy_pairs,
+        freq=freq,
+    )
 
     onchain_cfg = _build_dataclass(OnchainConfig, config.get("onchain"))
     if onchain_cfg.enabled:
@@ -100,17 +108,25 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the +hawkes variant.",
     )
+    parser.add_argument(
+        "--proxy-methods",
+        nargs="+",
+        choices=["median", "pw_rolling"],
+        default=None,
+        help=(
+            "Optional premium proxy method override(s). "
+            "Pass both to evaluate side-by-side: --proxy-methods median pw_rolling."
+        ),
+    )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    config = load_config(args.config)
-    matrix_path = args.price_matrix or config.get("data", {}).get("price_matrix_path")
-    if not matrix_path:
-        raise ValueError("No price matrix path configured. Use --price-matrix or set data.price_matrix_path.")
-
-    matrix = load_price_matrix(matrix_path)
+def _run_ablation_once(
+    config: dict[str, Any],
+    matrix: pd.DataFrame,
+    *,
+    skip_hawkes: bool,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     frames = _compute_core_frames(config, matrix)
     premium_frame = frames["premium_frame"]
     robust_frame = frames["robust_frame"]
@@ -210,7 +226,7 @@ def main() -> None:
     metrics_rows.append({"variant": "plus_regime", **regime_metrics})
     logs["plus_regime"] = regime_log
 
-    if not args.skip_hawkes:
+    if not skip_hawkes:
         hawkes_cfg = _build_dataclass(HawkesConfig, config.get("hawkes"))
         hawkes_cfg = replace(hawkes_cfg, enabled=True)
         hawkes_frame = estimate_hawkes_rolling(robust_frame["event"], hawkes_cfg)
@@ -240,32 +256,76 @@ def main() -> None:
         logs["plus_hawkes"] = hawkes_log
 
     metrics = pd.DataFrame(metrics_rows).set_index("variant")
-    variant_order = ["naive", "debias_only", "plus_robust", "plus_regime", "plus_hawkes"]
-    metrics = metrics.reindex([v for v in variant_order if v in metrics.index])
+    metrics = metrics.reindex([v for v in VARIANT_ORDER if v in metrics.index])
+    return metrics, logs
+
+
+def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+    matrix_path = args.price_matrix or config.get("data", {}).get("price_matrix_path")
+    if not matrix_path:
+        raise ValueError("No price matrix path configured. Use --price-matrix or set data.price_matrix_path.")
+
+    matrix = load_price_matrix(matrix_path)
+    configured_method = str(config.get("premium", {}).get("proxy_method", "median")).strip().lower()
+    proxy_methods = args.proxy_methods or [configured_method]
+    proxy_methods = [str(method).strip().lower() for method in proxy_methods]
+    if len(proxy_methods) == 0:
+        proxy_methods = ["median"]
+    invalid = sorted({method for method in proxy_methods if method not in {"median", "pw_rolling"}})
+    if invalid:
+        raise ValueError(f"Unsupported proxy methods: {invalid}. Use median and/or pw_rolling.")
+
+    method_runs: list[tuple[str, pd.DataFrame, dict[str, pd.DataFrame]]] = []
+    for method in proxy_methods:
+        run_cfg = deepcopy(config)
+        run_cfg.setdefault("premium", {})
+        run_cfg["premium"]["proxy_method"] = method
+        metrics, logs = _run_ablation_once(run_cfg, matrix, skip_hawkes=args.skip_hawkes)
+        method_runs.append((method, metrics, logs))
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = out_dir / "ablation_metrics.csv"
-    metrics.to_csv(metrics_path, index=True)
+    if len(method_runs) == 1:
+        method, metrics, logs = method_runs[0]
+        metrics.to_csv(metrics_path, index=True)
+        for variant, log in logs.items():
+            log.to_csv(out_dir / f"ablation_trade_log_{variant}.csv", index=True)
+        metrics_display = metrics
+    else:
+        combined_rows: list[pd.DataFrame] = []
+        for method, metrics, _ in method_runs:
+            block = metrics.reset_index().rename(columns={"index": "variant"})
+            block.insert(0, "proxy_method", method)
+            combined_rows.append(block)
+        metrics_multi = pd.concat(combined_rows, axis=0, ignore_index=True)
+        metrics_multi["variant"] = pd.Categorical(metrics_multi["variant"], categories=VARIANT_ORDER, ordered=True)
+        metrics_multi = metrics_multi.sort_values(["proxy_method", "variant"])
+        metrics_display = metrics_multi.set_index(["proxy_method", "variant"])
+        metrics_display.to_csv(metrics_path, index=True)
 
-    for variant, log in logs.items():
-        log.to_csv(out_dir / f"ablation_trade_log_{variant}.csv", index=True)
+        for method, _, logs in method_runs:
+            for variant, log in logs.items():
+                log.to_csv(out_dir / f"ablation_trade_log_{method}_{variant}.csv", index=True)
 
     summary = out_dir / "ablation_summary.md"
     with summary.open("w", encoding="utf-8") as handle:
         handle.write("# Ablation Summary\n\n")
         handle.write(f"- price_matrix: `{matrix_path}`\n")
         handle.write(f"- config: `{args.config}`\n\n")
+        handle.write(f"- proxy_methods: `{', '.join(proxy_methods)}`\n\n")
         handle.write("## Metrics\n\n")
         handle.write("```text\n")
-        handle.write(metrics.to_string())
+        handle.write(metrics_display.to_string())
         handle.write("\n```\n")
         handle.write("\n")
 
     print("Ablation completed.")
     print(f"- metrics: {metrics_path}")
     print(f"- summary: {summary}")
-    print(metrics)
+    print(metrics_display)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,82 @@ class DataContractTests(unittest.TestCase):
 
 
 class NoLookaheadTests(unittest.TestCase):
+    def test_pw_rolling_proxy_is_causal(self) -> None:
+        rng = np.random.default_rng(7)
+        idx = pd.date_range("2024-01-01", periods=220, freq="1min", tz="UTC")
+        n = len(idx)
+
+        stable = np.cumsum(rng.normal(0.0, 2e-5, n))
+        btc_base = 30_000.0 * np.exp(np.cumsum(rng.normal(0.0, 7e-4, n)))
+        eth_base = 2_000.0 * np.exp(np.cumsum(rng.normal(0.0, 9e-4, n)))
+        sol_base = 80.0 * np.exp(np.cumsum(rng.normal(0.0, 12e-4, n)))
+
+        btc_target_spread = stable + rng.normal(0.0, 8e-5, n)
+        eth_spread = stable + rng.normal(0.0, 6e-5, n)
+        sol_spread = stable + rng.normal(0.0, 7e-5, n)
+
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDT-PERP": btc_base,
+                "BTCUSDC-PERP": btc_base * np.exp(btc_target_spread),
+                "ETHUSDT-PERP": eth_base,
+                "ETHUSDC-PERP": eth_base * np.exp(eth_spread),
+                "SOLUSDT-PERP": sol_base,
+                "SOLUSDC-PERP": sol_base * np.exp(sol_spread),
+            },
+            index=idx,
+        )
+        cfg = PremiumConfig(
+            proxy_method="pw_rolling",
+            pw_window="30min",
+            pw_min_period_fraction=0.5,
+            pw_rho_clip=0.95,
+        )
+        proxy_pairs = [("ETHUSDC-PERP", "ETHUSDT-PERP"), ("SOLUSDC-PERP", "SOLUSDT-PERP")]
+
+        full, _ = build_premium_frame(
+            matrix,
+            cfg,
+            proxy_pairs=proxy_pairs,
+            freq="1min",
+        )
+        prefix, _ = build_premium_frame(
+            matrix.iloc[:140],
+            cfg,
+            proxy_pairs=proxy_pairs,
+            freq="1min",
+        )
+
+        np.testing.assert_allclose(
+            full["stablecoin_proxy"].iloc[:140].to_numpy(dtype=float),
+            prefix["stablecoin_proxy"].to_numpy(dtype=float),
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            full["p"].iloc[:140].to_numpy(dtype=float),
+            prefix["p"].to_numpy(dtype=float),
+            equal_nan=True,
+        )
+
+    def test_invalid_proxy_method_raises(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=4, freq="1min", tz="UTC")
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": [100.0, 100.2, 100.4, 100.3],
+                "BTCUSDT-PERP": [100.1, 100.1, 100.2, 100.2],
+                "ETHUSDC-PERP": [10.0, 10.1, 10.2, 10.3],
+                "ETHUSDT-PERP": [10.0, 10.0, 10.1, 10.1],
+            },
+            index=idx,
+        )
+        with self.assertRaisesRegex(ValueError, "Unsupported proxy_method"):
+            build_premium_frame(
+                matrix,
+                PremiumConfig(proxy_method="unsupported"),
+                proxy_pairs=[("ETHUSDC-PERP", "ETHUSDT-PERP")],
+                freq="1min",
+            )
+
     def test_fixed_quantile_threshold_is_causal(self) -> None:
         idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
         series = pd.Series([0.0, 0.0, 0.0, 1000.0], index=idx, name="pressure")

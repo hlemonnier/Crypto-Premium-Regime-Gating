@@ -245,6 +245,9 @@ Current defaults in `configs/config.yaml` include:
 - `regimes.recovery_quantile: 0.6`
 - `regimes.threshold_mode: expanding` (causal quantiles)
 - `regimes.zscore_mode: expanding` (causal robust standardization)
+- `premium.proxy_method: median` (`pw_rolling` also supported)
+- `premium.pw_window: 12h`
+- `premium.pw_min_period_fraction: 0.5`
 
 Reference OOS tuning table:
 
@@ -333,11 +336,24 @@ python -m src.ablation_report \
   --output-dir reports/tables
 ```
 
+Compare both premium proxy methods with the same ablation stack:
+
+```bash
+python -m src.ablation_report \
+  --price-matrix data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv \
+  --proxy-methods median pw_rolling \
+  --output-dir reports/tables
+```
+
 Artifacts:
 
 - `reports/tables/ablation_metrics.csv`
 - `reports/tables/ablation_trade_log_<variant>.csv`
 - `reports/tables/ablation_summary.md`
+
+When multiple proxy methods are requested, trade logs are exported as:
+
+- `reports/tables/ablation_trade_log_<proxy_method>_<variant>.csv`
 
 Variants included:
 

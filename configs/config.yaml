@@ -21,6 +21,11 @@ premium:
   auto_resolve_target_pair: true
   allow_target_pair_as_proxy: false
   fail_on_missing_proxy: true
+  proxy_method: median
+  pw_window: 12h
+  pw_min_period_fraction: 0.5
+  pw_rho_clip: 0.98
+  pw_fallback_to_median: true
   depeg_delta_log: 0.002
   depeg_min_consecutive: 5
   proxy_pairs:
