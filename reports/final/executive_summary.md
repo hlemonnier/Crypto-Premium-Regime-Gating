@@ -43,12 +43,12 @@ Metric convention: `sharpe` is full-series and non-annualized. Annualized Sharpe
 ## On-Chain Validation Snapshot
 
 ```text
-                       episode  onchain_data_ratio  onchain_usdc_minus_1_abs_mean  onchain_usdt_minus_1_abs_mean  onchain_divergence_abs_mean  onchain_depeg_count  combined_depeg_count
-         bybit_usdc_depeg_2023                 1.0                       0.001220                       0.001550                     0.031990                 1440                  1517
-        march_vol_2024_binance                 1.0                       0.001626                       0.000299                     0.000937                    0                     0
-           okx_usdc_depeg_2023                 1.0                       0.000820                       0.001067                     0.005698                  960                   966
-yen_followthrough_2024_binance                 1.0                       0.000000                       0.000593                     0.000579                    0                     0
-       yen_unwind_2024_binance                 1.0                       0.001000                       0.000500                     0.001382                    0                     0
+                       episode  onchain_data_ratio  onchain_usdc_minus_1_abs_mean  onchain_usdt_minus_1_abs_mean  onchain_divergence_abs_mean  onchain_depeg_count  combined_depeg_count  onchain_source_timestamp_ratio  onchain_source_age_hours_median
+         bybit_usdc_depeg_2023                 1.0                       0.001220                       0.001550                     0.031990                 1440                  1517                             0.0                              NaN
+        march_vol_2024_binance                 1.0                       0.001626                       0.000299                     0.000937                    0                     0                             1.0                        35.991667
+           okx_usdc_depeg_2023                 1.0                       0.000820                       0.001067                     0.005698                  960                   966                             0.0                              NaN
+yen_followthrough_2024_binance                 1.0                       0.000000                       0.000593                     0.000579                    0                     0                             1.0                        35.991667
+       yen_unwind_2024_binance                 1.0                       0.001000                       0.000500                     0.001382                    0                     0                             1.0                        83.991667
 ```
 
 ## Proxy Coverage Notes
@@ -89,16 +89,24 @@ Robust aggregate exclusion map is exported to: `reports/final/final_robust_filte
 ```text
                        episode  l2_orderbook_available  tick_trades_available  l2_ready                                                 l2_root
          bybit_usdc_depeg_2023                   False                  False     False          data/processed/orderbook/bybit_usdc_depeg_2023
-        march_vol_2024_binance                   False                  False     False         data/processed/orderbook/march_vol_2024_binance
-           okx_usdc_depeg_2023                   False                  False     False            data/processed/orderbook/okx_usdc_depeg_2023
-yen_followthrough_2024_binance                   False                  False     False data/processed/orderbook/yen_followthrough_2024_binance
-       yen_unwind_2024_binance                   False                  False     False        data/processed/orderbook/yen_unwind_2024_binance
+        march_vol_2024_binance                    True                   True      True         data/processed/orderbook/march_vol_2024_binance
+           okx_usdc_depeg_2023                   False                   True     False            data/processed/orderbook/okx_usdc_depeg_2023
+yen_followthrough_2024_binance                    True                   True      True data/processed/orderbook/yen_followthrough_2024_binance
+       yen_unwind_2024_binance                    True                   True      True        data/processed/orderbook/yen_unwind_2024_binance
 ```
 Execution-quality conclusions are withheld for episodes without complete L2 orderbook + tick-trade coverage.
 
 ## Execution Proxy Snapshot (Bar-Level)
 
-No proxy table is reported because fail-closed mode blocked execution diagnostics without full L2 readiness.
+```text
+  venue market_type  n_root_episode_pairs  mean_delta_large_raw_bps  median_delta_large_raw_bps  mean_delta_large_excess_bps  median_delta_large_excess_bps  mean_delta_large_norm  median_delta_large_norm  n_indeterminate_norm  median_recovery_bars_usdc  median_recovery_bars_usdt  mean_unrecovered_ratio_usdc  mean_unrecovered_ratio_usdt
+binance derivatives                     3                 -0.972122                   -0.931979                    -0.595878                      -0.520973              -0.034535                -0.047318                     2                        4.0                        4.5                          0.0                     0.002874
+```
+
+Interpretation: compare raw, excess, and normalized deltas jointly. A negative delta means lower proxy impact in USDC quotes versus USDT for the same root/venue.
+Scope note: this section is a bar-level proxy and does not validate order-book microstructure items from the Mike brief.
+Comparability note: venue comparisons are only defensible within the same `market_type` (`spot` vs `derivatives`).
+Decision guardrail: do not conclude 'better liquidity' without L2 order-book replay (book-walk), and normalization of tick/lot/fees/funding/contract specs.
 
 ## Generated Artifacts
 
