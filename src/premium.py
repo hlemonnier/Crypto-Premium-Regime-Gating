@@ -327,14 +327,26 @@ def compute_depeg_flag(
     *,
     delta_log: float = 0.002,
     min_consecutive: int = 5,
+    freq: str | None = None,
 ) -> pd.Series:
     if min_consecutive < 1:
         raise ValueError("min_consecutive must be >= 1")
+    min_bars = int(min_consecutive)
+    if freq is not None:
+        freq_td = pd.to_timedelta(freq)
+        if freq_td <= pd.Timedelta(0):
+            raise ValueError(f"freq must map to a positive timedelta, got {freq!r}")
+        freq_minutes = float(freq_td.total_seconds() / 60.0)
+        if freq_minutes <= 0.0:
+            raise ValueError(f"freq must map to a positive timedelta, got {freq!r}")
+        # `min_consecutive` is specified in minutes to keep behavior stable
+        # when changing bar frequency (1s, 1min, ...).
+        min_bars = max(1, int(np.ceil(float(min_consecutive) / freq_minutes)))
     excursion = stablecoin_proxy.abs().ge(delta_log)
     active = (
-        excursion.rolling(min_consecutive, min_periods=min_consecutive)
+        excursion.rolling(min_bars, min_periods=min_bars)
         .sum()
-        .ge(min_consecutive)
+        .ge(min_bars)
     )
     return active.fillna(False).rename("depeg_flag")
 
@@ -388,6 +400,7 @@ def build_premium_frame(
         stablecoin_proxy,
         delta_log=cfg.depeg_delta_log,
         min_consecutive=cfg.depeg_min_consecutive,
+        freq=freq,
     )
     out = pd.concat([p_naive, stablecoin_proxy, debiased, depeg_flag], axis=1)
     return out, proxy_components

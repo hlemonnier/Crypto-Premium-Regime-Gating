@@ -26,6 +26,15 @@ class StrategyConfig:
     hawkes_risk_off_threshold: float = 0.85
 
 
+def _fallback_sigma_scale(m_t: pd.Series, *, min_periods: int = 20, floor: float = 1e-8) -> pd.Series:
+    abs_m = pd.to_numeric(m_t, errors="coerce").abs()
+    expanding_med = abs_m.expanding(min_periods=max(2, int(min_periods))).median().shift(1)
+    fallback = expanding_med.clip(lower=float(floor))
+    fallback = fallback.fillna(abs_m.expanding(min_periods=1).median().shift(1))
+    fallback = fallback.clip(lower=float(floor))
+    return fallback.rename("fallback_sigma_scale")
+
+
 def compute_widen_flag(
     T_t: pd.Series,
     chi_t: pd.Series,
@@ -79,10 +88,12 @@ def build_decisions(
         threshold_window=cfg.threshold_window,
     )
     widen_flag = widen_frame["widen_flag"].astype(bool)
+    sigma_scale = pd.Series(np.nan, index=m_t.index, dtype="float64")
     if sigma_hat is not None:
-        entry_threshold = (cfg.entry_k * T_t * sigma_hat).rename("entry_threshold")
-    else:
-        entry_threshold = (cfg.entry_k * T_t).rename("entry_threshold")
+        sigma_scale = pd.to_numeric(sigma_hat, errors="coerce").rename("sigma_scale")
+    sigma_fallback = _fallback_sigma_scale(m_t)
+    sigma_scale = sigma_scale.where(sigma_scale.gt(0.0), sigma_fallback)
+    entry_threshold = (cfg.entry_k * T_t * sigma_scale).rename("entry_threshold")
 
     decision = pd.Series("Widen", index=m_t.index, name="decision", dtype="object")
     side = pd.Series("Flat", index=m_t.index, name="trade_side", dtype="object")

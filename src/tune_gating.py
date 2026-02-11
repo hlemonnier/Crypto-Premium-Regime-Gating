@@ -391,6 +391,17 @@ def main() -> None:
         sort_cols.insert(1, "oos_mean_sharpe_full_raw")
     table = table.sort_values(sort_cols, ascending=False).reset_index(drop=True)
 
+    train_episode_ids = "|".join(sorted(train_matrices.keys()))
+    oos_episode_ids = "|".join(sorted(oos_matrices.keys()))
+    table["run_explicit_split"] = bool(explicit_split)
+    table["run_holdout_count"] = int(args.holdout_count)
+    table["run_min_train_episodes_required"] = int(args.min_train_episodes)
+    table["run_min_oos_episodes_required"] = int(args.min_oos_episodes)
+    table["run_train_episode_count"] = int(len(train_matrices))
+    table["run_oos_episode_count"] = int(len(oos_matrices))
+    table["run_train_episode_ids"] = train_episode_ids
+    table["run_oos_episode_ids"] = oos_episode_ids
+
     print("Top combinations:")
     print(table.head(args.top).to_string(index=False))
 

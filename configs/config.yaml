@@ -8,6 +8,7 @@ data:
   single_bar_spike_jump_log: 0.015
   single_bar_spike_reversion_log: 0.003
   single_bar_spike_counterpart_max_log: 0.002
+  single_bar_spike_min_cross_pairs: 1
   price_matrix_path: data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv
 data_sources:
   binance: https://data.binance.vision/?prefix=data/

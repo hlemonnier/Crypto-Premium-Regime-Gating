@@ -32,6 +32,7 @@ class IngestConfig:
     single_bar_spike_jump_log: float = 0.015
     single_bar_spike_reversion_log: float = 0.003
     single_bar_spike_counterpart_max_log: float = 0.002
+    single_bar_spike_min_cross_pairs: int = 1
 
 
 def _pick_existing(candidates: Sequence[str], columns: Sequence[str]) -> str | None:
@@ -40,6 +41,43 @@ def _pick_existing(candidates: Sequence[str], columns: Sequence[str]) -> str | N
         if candidate in colset:
             return candidate
     return None
+
+
+def parse_timestamp_utc(values: pd.Series | Sequence[object]) -> pd.Series:
+    raw = pd.Series(values, copy=False)
+    parsed_text = pd.to_datetime(raw, utc=True, errors="coerce")
+    numeric = pd.to_numeric(raw, errors="coerce")
+    numeric_mask = numeric.notna()
+    if not bool(numeric_mask.any()):
+        return parsed_text
+
+    parsed_numeric = pd.Series(pd.NaT, index=raw.index, dtype="datetime64[ns, UTC]")
+    abs_num = numeric.abs()
+    ns_mask = numeric_mask & abs_num.ge(1e17)
+    us_mask = numeric_mask & abs_num.ge(1e14) & abs_num.lt(1e17)
+    ms_mask = numeric_mask & abs_num.ge(1e11) & abs_num.lt(1e14)
+    sec_mask = numeric_mask & abs_num.ge(1e9) & abs_num.lt(1e11)
+
+    if bool(ns_mask.any()):
+        parsed_numeric.loc[ns_mask] = pd.to_datetime(numeric.loc[ns_mask], unit="ns", utc=True, errors="coerce")
+    if bool(us_mask.any()):
+        parsed_numeric.loc[us_mask] = pd.to_datetime(numeric.loc[us_mask], unit="us", utc=True, errors="coerce")
+    if bool(ms_mask.any()):
+        parsed_numeric.loc[ms_mask] = pd.to_datetime(numeric.loc[ms_mask], unit="ms", utc=True, errors="coerce")
+    if bool(sec_mask.any()):
+        parsed_numeric.loc[sec_mask] = pd.to_datetime(numeric.loc[sec_mask], unit="s", utc=True, errors="coerce")
+
+    other_numeric_mask = numeric_mask & ~(ns_mask | us_mask | ms_mask | sec_mask)
+    if bool(other_numeric_mask.any()):
+        parsed_numeric.loc[other_numeric_mask] = pd.to_datetime(
+            raw.loc[other_numeric_mask].astype("string"),
+            utc=True,
+            errors="coerce",
+        )
+
+    out = parsed_text.copy()
+    out.loc[numeric_mask] = parsed_numeric.loc[numeric_mask]
+    return out
 
 
 def read_market_file(
@@ -84,7 +122,7 @@ def read_market_file(
         )
 
     out = pd.DataFrame()
-    out["timestamp_utc"] = pd.to_datetime(df[timestamp_col], utc=True, errors="coerce")
+    out["timestamp_utc"] = parse_timestamp_utc(df[timestamp_col])
     out["price"] = pd.to_numeric(df[price_col], errors="coerce")
 
     if symbol_override is not None:
@@ -176,6 +214,7 @@ def sanitize_single_bar_spikes(
     jump_threshold_log: float = 0.015,
     reversion_tolerance_log: float = 0.003,
     counterpart_max_move_log: float = 0.002,
+    min_cross_confirm_pairs: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if price_matrix.empty:
         return price_matrix.copy(), pd.DataFrame()
@@ -183,32 +222,54 @@ def sanitize_single_bar_spikes(
     cleaned = price_matrix.copy()
     source = price_matrix.copy()
     flags: list[dict[str, object]] = []
+    inferred_pairs = _infer_stablecoin_pairs(list(source.columns))
+    if not inferred_pairs:
+        return cleaned, pd.DataFrame()
 
-    for usdc_symbol, usdt_symbol in _infer_stablecoin_pairs(list(source.columns)):
+    spread_ret_matrix = pd.DataFrame(index=source.index, dtype=float)
+    pair_data: dict[tuple[str, str], dict[str, pd.Series]] = {}
+    for usdc_symbol, usdt_symbol in inferred_pairs:
         usdc = pd.to_numeric(source[usdc_symbol], errors="coerce").clip(lower=1e-12)
         usdt = pd.to_numeric(source[usdt_symbol], errors="coerce").clip(lower=1e-12)
         ret_usdc = np.log(usdc).diff()
         ret_usdt = np.log(usdt).diff()
-        spread = np.log(usdc) - np.log(usdt)
-        spread_ret = spread.diff()
-        next_spread = spread_ret.shift(-1)
-        next_usdc = ret_usdc.shift(-1)
-        next_usdt = ret_usdt.shift(-1)
+        spread_ret = (np.log(usdc) - np.log(usdt)).diff()
+        pair_key = f"{usdc_symbol}__{usdt_symbol}"
+        spread_ret_matrix[pair_key] = spread_ret
+        pair_data[(usdc_symbol, usdt_symbol)] = {
+            "ret_usdc": ret_usdc,
+            "ret_usdt": ret_usdt,
+            "spread_ret": spread_ret,
+        }
 
-        spread_spike = (
-            spread_ret.abs().ge(jump_threshold_log)
-            & (spread_ret.mul(next_spread).lt(0))
-            & spread_ret.add(next_spread).abs().le(reversion_tolerance_log)
-        )
+    min_context_pairs = max(1, int(min_cross_confirm_pairs))
+    corroboration_cap = min(float(reversion_tolerance_log), float(counterpart_max_move_log))
+
+    for usdc_symbol, usdt_symbol in inferred_pairs:
+        pair_key = f"{usdc_symbol}__{usdt_symbol}"
+        pair_ret = pair_data[(usdc_symbol, usdt_symbol)]
+        ret_usdc = pair_ret["ret_usdc"]
+        ret_usdt = pair_ret["ret_usdt"]
+        spread_ret = pair_ret["spread_ret"]
+
+        cross_frame = spread_ret_matrix.drop(columns=[pair_key], errors="ignore")
+        if cross_frame.empty:
+            continue
+        cross_confirm_pairs = cross_frame.notna().sum(axis=1)
+        cross_abs_med = cross_frame.abs().median(axis=1, skipna=True).fillna(np.inf)
+        no_cross_confirmation = cross_confirm_pairs.ge(min_context_pairs) & cross_abs_med.le(corroboration_cap)
+
         usdc_spike = (
-            spread_spike
+            no_cross_confirmation
             & ret_usdc.abs().ge(jump_threshold_log)
             & ret_usdt.abs().le(counterpart_max_move_log)
+            & spread_ret.abs().ge(jump_threshold_log)
         ).fillna(False)
         usdt_spike = (
-            spread_spike
+            no_cross_confirmation
             & ret_usdt.abs().ge(jump_threshold_log)
             & ret_usdc.abs().le(counterpart_max_move_log)
+            & spread_ret.abs().ge(jump_threshold_log)
         ).fillna(False)
 
         usdc_idx = cleaned.index[usdc_spike]
@@ -225,8 +286,9 @@ def sanitize_single_bar_spikes(
                     "symbol": usdc_symbol,
                     "counterpart_symbol": usdt_symbol,
                     "ret_log": float(ret_usdc.loc[ts]),
-                    "next_ret_log": float(next_usdc.loc[ts]),
                     "counterpart_ret_log": float(ret_usdt.loc[ts]),
+                    "cross_abs_median_ret_log": float(cross_abs_med.loc[ts]),
+                    "cross_confirm_pairs": int(cross_confirm_pairs.loc[ts]),
                     "action": "replace_with_prev",
                 }
             )
@@ -237,8 +299,9 @@ def sanitize_single_bar_spikes(
                     "symbol": usdt_symbol,
                     "counterpart_symbol": usdc_symbol,
                     "ret_log": float(ret_usdt.loc[ts]),
-                    "next_ret_log": float(next_usdt.loc[ts]),
                     "counterpart_ret_log": float(ret_usdc.loc[ts]),
+                    "cross_abs_median_ret_log": float(cross_abs_med.loc[ts]),
+                    "cross_confirm_pairs": int(cross_confirm_pairs.loc[ts]),
                     "action": "replace_with_prev",
                 }
             )
@@ -255,7 +318,7 @@ def clean_market_table(raw: pd.DataFrame, cfg: IngestConfig) -> pd.DataFrame:
         raise ValueError(f"Input table misses required columns: {missing}")
 
     df = raw.copy()
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+    df["timestamp_utc"] = parse_timestamp_utc(df["timestamp_utc"])
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df["symbol"] = df["symbol"].astype(str)
 
@@ -313,6 +376,7 @@ def build_processed_prices(raw: pd.DataFrame, cfg: IngestConfig) -> tuple[pd.Dat
             jump_threshold_log=cfg.single_bar_spike_jump_log,
             reversion_tolerance_log=cfg.single_bar_spike_reversion_log,
             counterpart_max_move_log=cfg.single_bar_spike_counterpart_max_log,
+            min_cross_confirm_pairs=cfg.single_bar_spike_min_cross_pairs,
         )
         if not diagnostics.empty:
             warnings.warn(
@@ -458,6 +522,12 @@ def parse_args() -> argparse.Namespace:
         help="Max counterpart log-return to classify one-leg jumps as stale spikes.",
     )
     parser.add_argument(
+        "--single-bar-spike-min-cross-pairs",
+        type=int,
+        default=1,
+        help="Minimum number of other USDC/USDT pairs needed to confirm a move is isolated.",
+    )
+    parser.add_argument(
         "--column-map",
         default=None,
         help="Optional rename map old:new,old2:new2.",
@@ -477,6 +547,7 @@ def main() -> None:
         single_bar_spike_jump_log=args.single_bar_spike_jump_log,
         single_bar_spike_reversion_log=args.single_bar_spike_reversion_log,
         single_bar_spike_counterpart_max_log=args.single_bar_spike_counterpart_max_log,
+        single_bar_spike_min_cross_pairs=args.single_bar_spike_min_cross_pairs,
     )
     raw = load_market_files(files, column_map=column_map)
     resampled, matrix = build_processed_prices(raw, cfg)

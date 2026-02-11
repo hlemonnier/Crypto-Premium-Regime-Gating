@@ -225,13 +225,24 @@ def run_backtest(
     sharpe_active = _sharpe_ratio(pnl_when_active)
     sharpe_active_annualized = float(sharpe_active * annualization)
     hit_rate = float((pnl_when_active > 0).mean()) if not pnl_when_active.empty else 0.0
-    decision_flip = decision.ne(decision.shift(1))
-    if not decision_flip.empty:
-        decision_flip.iloc[0] = False
-    position_flip = pos.ne(pos.shift(1))
-    if not position_flip.empty:
-        position_flip.iloc[0] = False
-    flip_rate = float(decision_flip.mean())
+    decision_prev = decision.shift(1)
+    valid_decision_transition = decision.notna() & decision_prev.notna()
+    decision_flip = decision.ne(decision_prev) & valid_decision_transition
+    flip_rate = (
+        float(decision_flip.sum()) / float(valid_decision_transition.sum())
+        if int(valid_decision_transition.sum()) > 0
+        else 0.0
+    )
+
+    pos_num = pd.to_numeric(pos, errors="coerce")
+    pos_prev = pos_num.shift(1)
+    valid_position_transition = pos_num.notna() & pos_prev.notna()
+    position_flip = pos_num.ne(pos_prev) & valid_position_transition
+    position_flip_rate = (
+        float(position_flip.sum()) / float(valid_position_transition.sum())
+        if int(valid_position_transition.sum()) > 0
+        else 0.0
+    )
 
     avg_holding = float(position_frame["holding_bars"].replace(0, np.nan).mean())
     if not np.isfinite(avg_holding):
@@ -254,7 +265,7 @@ def run_backtest(
         "flip_rate": flip_rate,
         "hit_rate": hit_rate,
         "active_ratio": float(in_market.mean()),
-        "position_flip_rate": float(position_flip.mean()),
+        "position_flip_rate": position_flip_rate,
         "avg_holding_bars": avg_holding,
         "n_bars": int(len(net_pnl)),
         "n_active_bars": int(active_mask.sum()),

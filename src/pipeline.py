@@ -10,7 +10,7 @@ import pandas as pd
 import yaml
 
 from src.backtest import BacktestConfig, compare_strategies, export_metrics
-from src.data_ingest import sanitize_single_bar_spikes
+from src.data_ingest import parse_timestamp_utc, sanitize_single_bar_spikes
 from src.hawkes import HawkesConfig, estimate_hawkes_rolling
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.plots import (
@@ -51,6 +51,7 @@ def load_price_matrix(
     single_bar_spike_jump_log: float = 0.015,
     single_bar_spike_reversion_log: float = 0.003,
     single_bar_spike_counterpart_max_log: float = 0.002,
+    single_bar_spike_min_cross_pairs: int = 1,
 ) -> pd.DataFrame:
     matrix_path = Path(path)
     if not matrix_path.exists():
@@ -68,9 +69,9 @@ def load_price_matrix(
     if not isinstance(frame.index, pd.DatetimeIndex):
         if "timestamp_utc" in frame.columns:
             frame = frame.set_index("timestamp_utc")
-        frame.index = pd.to_datetime(frame.index, utc=True, errors="coerce")
+        frame.index = pd.DatetimeIndex(parse_timestamp_utc(pd.Series(frame.index)))
     else:
-        frame.index = pd.to_datetime(frame.index, utc=True, errors="coerce")
+        frame.index = pd.DatetimeIndex(parse_timestamp_utc(pd.Series(frame.index)))
 
     nat_rows = int(frame.index.isna().sum())
     if nat_rows > 0:
@@ -96,6 +97,7 @@ def load_price_matrix(
             jump_threshold_log=single_bar_spike_jump_log,
             reversion_tolerance_log=single_bar_spike_reversion_log,
             counterpart_max_move_log=single_bar_spike_counterpart_max_log,
+            min_cross_confirm_pairs=single_bar_spike_min_cross_pairs,
         )
         if not diagnostics.empty:
             warnings.warn(
@@ -293,6 +295,7 @@ def main() -> None:
         single_bar_spike_jump_log=float(data_cfg.get("single_bar_spike_jump_log", 0.015)),
         single_bar_spike_reversion_log=float(data_cfg.get("single_bar_spike_reversion_log", 0.003)),
         single_bar_spike_counterpart_max_log=float(data_cfg.get("single_bar_spike_counterpart_max_log", 0.002)),
+        single_bar_spike_min_cross_pairs=int(data_cfg.get("single_bar_spike_min_cross_pairs", 1)),
     )
     results = run_pipeline(config, price_matrix)
     exported = export_outputs(results, config)

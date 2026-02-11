@@ -1,6 +1,6 @@
 # Crypto Premium Regime Gating (Hiring Project)
 
-This repository implements the v5 framework described in `AGENT.md` and the two notes:
+This repository implements the v5 framework described in `AGENTS.md` and the two notes:
 
 - `Notice.pdf` (baseline: premium + stat-mech + regime gating)
 - `Notice + Hawkes.pdf` (optional Hawkes contagion overlay)
@@ -11,7 +11,7 @@ This project combines:
 
 - Stable coin analysis:
   - fair-value proxy of `USDT/USDC` spread via cross-asset replication
-  - depeg detection flag (`delta_log`, consecutive windows)
+  - depeg detection flag (`delta_log`, consecutive minutes converted to bars from `data.resample_rule`)
   - dedicated on-chain validation feed (`onchain_proxy` from DefiLlama)
   - transmission into synthetic premium (`BTCUSDC` vs `BTCUSDT`)
 - Premium analysis (robust estimation):
@@ -101,8 +101,9 @@ Loader safety behavior:
 - rows with invalid timestamps are dropped with warning
 - duplicate timestamps are deduplicated with `keep='last'` and warning
 - matched USDC/USDT pairs are sanitized for one-bar stale spikes by default
-  - rule: large jump + immediate opposite reversion + quiet counterpart leg
+  - rule: large one-leg jump + quiet counterpart leg + no cross-asset confirmation on other USDC/USDT pairs
   - action: replace suspected stale point with previous bar value
+  - implementation is causal (no future bar lookup)
 
 Target contract handling is now auto-adaptive by default:
 
@@ -232,6 +233,7 @@ Default tuning split behavior:
 - when `--train-episodes/--test-episodes` are not provided, episodes are sorted chronologically and the last `--holdout-count` episodes are used as OOS.
 - fail-closed defaults require at least `--min-train-episodes` and `--min-oos-episodes`; tuning aborts if the split is too small.
 - output includes both `train_*` and `oos_*` metrics plus `selection_score`.
+- output also includes reproducibility metadata (`run_*`: split constraints, effective episode counts, and episode ids).
 - selection defaults to a blended score (`--oos-weight 0.5`).
 
 Current defaults in `configs/config.yaml` include:

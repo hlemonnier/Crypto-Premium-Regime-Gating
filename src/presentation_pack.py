@@ -44,6 +44,16 @@ def _read_onchain_snapshot(episode: str, reports_root: Path) -> dict[str, Any] |
     }
     if not needed.issubset(set(frame.columns)):
         return None
+    source_ts = (
+        pd.to_datetime(frame["onchain_source_timestamp_utc"], utc=True, errors="coerce")
+        if "onchain_source_timestamp_utc" in frame.columns
+        else pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]")
+    )
+    source_age = (
+        pd.to_numeric(frame["onchain_source_age_hours"], errors="coerce")
+        if "onchain_source_age_hours" in frame.columns
+        else pd.Series(np.nan, index=frame.index, dtype="float64")
+    )
     return {
         "episode": episode,
         "onchain_data_ratio": float(pd.to_numeric(frame["onchain_proxy"], errors="coerce").notna().mean()),
@@ -58,6 +68,8 @@ def _read_onchain_snapshot(episode: str, reports_root: Path) -> dict[str, Any] |
         ),
         "onchain_depeg_count": int(pd.to_numeric(frame["onchain_depeg_flag"], errors="coerce").fillna(0).astype(bool).sum()),
         "combined_depeg_count": int(pd.to_numeric(frame["depeg_flag"], errors="coerce").fillna(0).astype(bool).sum()),
+        "onchain_source_timestamp_ratio": float(source_ts.notna().mean()),
+        "onchain_source_age_hours_median": float(source_age.median(skipna=True)),
     }
 
 

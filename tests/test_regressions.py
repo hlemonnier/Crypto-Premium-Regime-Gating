@@ -9,11 +9,11 @@ import pandas as pd
 
 from src.backtest import periods_per_year_from_freq, run_backtest
 from src.bybit_data import bybit_interval_to_ms
-from src.data_ingest import _remove_glitches, sanitize_single_bar_spikes
+from src.data_ingest import _remove_glitches, read_market_file, sanitize_single_bar_spikes
 from src.execution_quality import build_cross_quote_comparison, build_l2_coverage, build_venue_summary
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.pipeline import load_price_matrix
-from src.premium import PremiumConfig, build_premium_frame
+from src.premium import PremiumConfig, build_premium_frame, compute_depeg_flag
 from src.regimes import build_regime_score
 from src.robust_filter import robust_filter
 from src.strategy import StrategyConfig, build_decisions
@@ -205,6 +205,32 @@ class NoLookaheadTests(unittest.TestCase):
             equal_nan=True,
         )
 
+    def test_single_bar_spike_sanitizer_is_causal(self) -> None:
+        idx = pd.date_range("2024-08-05 13:58:00", periods=6, freq="1min", tz="UTC")
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": [51980.0, 51938.0, 53418.0, 53180.0, 52940.0, 52930.0],
+                "BTCUSDT-PERP": [51968.0, 51928.0, 51928.0, 53170.0, 52936.0, 52920.0],
+                "ETHUSDC-PERP": [2500.0, 2501.0, 2502.0, 2503.0, 2504.0, 2505.0],
+                "ETHUSDT-PERP": [2500.2, 2501.2, 2502.2, 2503.2, 2504.2, 2505.2],
+            },
+            index=idx,
+        )
+        full, _ = sanitize_single_bar_spikes(
+            matrix,
+            jump_threshold_log=0.015,
+            reversion_tolerance_log=0.003,
+            counterpart_max_move_log=0.002,
+        )
+        prefix, _ = sanitize_single_bar_spikes(
+            matrix.iloc[:5],
+            jump_threshold_log=0.015,
+            reversion_tolerance_log=0.003,
+            counterpart_max_move_log=0.002,
+        )
+
+        pd.testing.assert_frame_equal(full.iloc[:5], prefix)
+
 
 class HitRateTests(unittest.TestCase):
     def test_hit_rate_counts_only_active_position_bars(self) -> None:
@@ -323,6 +349,34 @@ class HawkesAdaptiveThresholdTests(unittest.TestCase):
         self.assertTrue(out["hawkes_riskoff_signal"].iloc[7:].any())
 
 
+class StrategyFallbackThresholdTests(unittest.TestCase):
+    def test_missing_sigma_hat_uses_signal_scale_fallback(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=130, freq="1min", tz="UTC")
+        m_t = pd.Series([0.01] * 129 + [0.08], index=idx, name="m_t")
+        T_t = pd.Series(1.0, index=idx, name="T_t")
+        chi_t = pd.Series(0.0, index=idx, name="chi_t")
+        regime = pd.Series("transient", index=idx, name="regime")
+        depeg_flag = pd.Series(False, index=idx, name="depeg_flag")
+        cfg = StrategyConfig(
+            entry_k=2.0,
+            threshold_min_periods=10_000,
+        )
+
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=None,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            n_t=None,
+            cfg=cfg,
+        )
+
+        self.assertTrue(float(out["entry_threshold"].iloc[-1]) < 0.05)
+        self.assertEqual(str(out["decision"].iloc[-1]), "Trade")
+
+
 class PriceMatrixLoaderTests(unittest.TestCase):
     def test_loader_drops_nat_and_duplicate_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -348,6 +402,25 @@ class PriceMatrixLoaderTests(unittest.TestCase):
                 float(loaded.loc[pd.Timestamp("2024-01-01T00:00:00Z"), "BTCUSDT-PERP"]),
                 102.0,
             )
+
+
+class DataIngestTimestampTests(unittest.TestCase):
+    def test_read_market_file_parses_epoch_milliseconds_as_utc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "raw.csv"
+            raw = pd.DataFrame(
+                {
+                    "ts": [1704067200000, 1704067260000],
+                    "symbol": ["BTCUSDT-PERP", "BTCUSDT-PERP"],
+                    "price": [42000.0, 42010.0],
+                }
+            )
+            raw.to_csv(path, index=False)
+
+            frame = read_market_file(path)
+
+            self.assertEqual(str(frame.loc[0, "timestamp_utc"]), "2024-01-01 00:00:00+00:00")
+            self.assertEqual(str(frame.loc[1, "timestamp_utc"]), "2024-01-01 00:01:00+00:00")
 
 
 class OnchainColumnsTests(unittest.TestCase):
@@ -428,6 +501,24 @@ class OnchainCadenceTests(unittest.TestCase):
             self.assertGreater(float(frame.loc[ts, "onchain_source_age_hours"]), 24.0)
 
 
+class DepegCadenceTests(unittest.TestCase):
+    def test_depeg_min_consecutive_is_interpreted_in_minutes(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=310, freq="1s", tz="UTC")
+        proxy = pd.Series(0.003, index=idx, name="stablecoin_proxy")
+        proxy.iloc[300:] = 0.0
+
+        flag = compute_depeg_flag(
+            proxy,
+            delta_log=0.002,
+            min_consecutive=5,
+            freq="1s",
+        )
+
+        self.assertFalse(bool(flag.iloc[298]))
+        self.assertTrue(bool(flag.iloc[299]))
+        self.assertFalse(bool(flag.iloc[300]))
+
+
 class GlitchFilterTests(unittest.TestCase):
     def test_glitch_filter_is_centered_on_robust_location(self) -> None:
         idx = pd.date_range("2024-01-01", periods=40, freq="1min", tz="UTC")
@@ -454,6 +545,8 @@ class StablecoinSpikeSanitizerTests(unittest.TestCase):
             {
                 "BTCUSDC-PERP": [51980.0, 51938.0, 53418.0, 53180.0, 52940.0],
                 "BTCUSDT-PERP": [51968.0, 51928.0, 51928.0, 53170.0, 52936.0],
+                "ETHUSDC-PERP": [2500.0, 2501.0, 2502.0, 2503.0, 2504.0],
+                "ETHUSDT-PERP": [2500.2, 2501.2, 2502.2, 2503.2, 2504.2],
             },
             index=idx,
         )

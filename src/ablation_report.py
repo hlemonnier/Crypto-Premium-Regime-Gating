@@ -187,7 +187,7 @@ def _run_ablation_once(
         depeg_flag=premium_frame["depeg_flag"],
     )
     robust_log, robust_metrics = run_backtest(
-        premium_frame["p"],
+        robust_frame["p_smooth"],
         robust_decision,
         robust_frame["p_smooth"],
         freq=freq,
