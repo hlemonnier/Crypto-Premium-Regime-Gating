@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.data_ingest import parse_timestamp_utc
+
 
 DEFAULT_EPISODES = [
     "bybit_usdc_depeg_2023",
@@ -111,7 +113,7 @@ def _empty_table(columns: list[str]) -> pd.DataFrame:
 
 def _has_any_path(root: Path, patterns: list[str]) -> bool:
     for pattern in patterns:
-        if any(root.glob(pattern)):
+        if any(root.rglob(pattern)):
             return True
     return False
 
@@ -125,14 +127,27 @@ def build_l2_coverage(episodes: list[str], l2_root: Path) -> pd.DataFrame:
             [
                 "*orderbook*level*2*.parquet",
                 "*orderbook*level*2*.csv",
+                "*orderbook*level*2*.zip",
+                "*orderbook*level*2*.csv.gz",
                 "*orderbook*l2*.parquet",
                 "*orderbook*l2*.csv",
+                "*orderbook*l2*.zip",
+                "*orderbook*l2*.csv.gz",
                 "*book*l2*.parquet",
                 "*book*l2*.csv",
+                "*book*l2*.zip",
+                "*book*l2*.csv.gz",
                 "orderbook*.parquet",
                 "orderbook*.csv",
+                "orderbook*.zip",
+                "orderbook*.csv.gz",
                 "depth*.parquet",
                 "depth*.csv",
+                "depth*.zip",
+                "depth*.csv.gz",
+                "*bookDepth*.zip",
+                "*bookDepth*.csv",
+                "*bookDepth*.csv.gz",
             ],
         )
         has_ticks = _has_any_path(
@@ -140,10 +155,16 @@ def build_l2_coverage(episodes: list[str], l2_root: Path) -> pd.DataFrame:
             [
                 "*trade*tick*.parquet",
                 "*trade*tick*.csv",
+                "*trade*tick*.zip",
+                "*trade*tick*.csv.gz",
                 "*trades*.parquet",
                 "*trades*.csv",
+                "*trades*.zip",
+                "*trades*.csv.gz",
                 "*aggTrade*.parquet",
                 "*aggTrade*.csv",
+                "*aggTrade*.zip",
+                "*aggTrade*.csv.gz",
             ],
         )
         rows.append(
@@ -194,33 +215,270 @@ def _preference_from_delta(delta: float, *, tolerance: float) -> str:
     return "indeterminate"
 
 
+def _normalize_execution_frame(frame: pd.DataFrame, *, episode: str, source: str) -> pd.DataFrame:
+    required = {"timestamp_utc", "price", "volume", "symbol", "venue"}
+    if not required.issubset(set(frame.columns)):
+        return pd.DataFrame()
+
+    out = frame.copy()
+    out["timestamp_utc"] = parse_timestamp_utc(out["timestamp_utc"])
+    out["price"] = pd.to_numeric(out["price"], errors="coerce")
+    out["volume"] = pd.to_numeric(out["volume"], errors="coerce").abs()
+    out["symbol"] = out["symbol"].astype(str)
+    out["venue"] = out["venue"].astype(str)
+    out = out.dropna(subset=["timestamp_utc", "price", "symbol", "venue"]).copy()
+    out = out[out["price"] > 0].copy()
+    out = out.dropna(subset=["volume"]).copy()
+    out["episode"] = episode
+    out["execution_source"] = source
+
+    parsed = out["symbol"].map(_parse_symbol)
+    out["root"] = parsed.map(lambda x: x[0] if x else None)
+    out["quote"] = parsed.map(lambda x: x[1] if x else None)
+    out["suffix"] = parsed.map(lambda x: x[2] if x else None)
+    out["market_type"] = out["suffix"].map(_market_type_from_suffix)
+    out = out[out["quote"].isin(["USDC", "USDT"])].copy()
+    out = out[out["market_type"].isin(["spot", "derivatives"])].copy()
+    return out
+
+
+def _infer_symbol_from_filename(name: str) -> str | None:
+    patterns = [
+        re.compile(r"^(?P<sym>[A-Z0-9]+)-(?:trades|aggTrades)-\d{4}-\d{2}-\d{2}\.zip$"),
+        re.compile(r"^(?P<sym>[A-Z0-9]+)-\d{4}-\d{2}\.csv\.gz$"),
+        re.compile(r"^(?P<sym>[A-Z0-9]+)\d{4}-\d{2}-\d{2}\.csv\.gz$"),
+    ]
+    for pattern in patterns:
+        match = pattern.match(name)
+        if match is not None:
+            return str(match.group("sym"))
+    return None
+
+
+def _aggregate_tick_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return rows
+    local = rows.copy()
+    ts_raw = local["timestamp_utc"]
+    ts_num = pd.to_numeric(ts_raw, errors="coerce")
+    ts = pd.Series(pd.NaT, index=local.index, dtype="datetime64[ns, UTC]")
+    abs_num = ts_num.abs()
+    ns_mask = ts_num.notna() & abs_num.ge(1e17)
+    us_mask = ts_num.notna() & abs_num.ge(1e14) & abs_num.lt(1e17)
+    ms_mask = ts_num.notna() & abs_num.ge(1e11) & abs_num.lt(1e14)
+    sec_mask = ts_num.notna() & abs_num.ge(1e9) & abs_num.lt(1e11)
+    if bool(ns_mask.any()):
+        ts.loc[ns_mask] = pd.to_datetime(ts_num.loc[ns_mask], unit="ns", utc=True, errors="coerce")
+    if bool(us_mask.any()):
+        ts.loc[us_mask] = pd.to_datetime(ts_num.loc[us_mask], unit="us", utc=True, errors="coerce")
+    if bool(ms_mask.any()):
+        ts.loc[ms_mask] = pd.to_datetime(ts_num.loc[ms_mask], unit="ms", utc=True, errors="coerce")
+    if bool(sec_mask.any()):
+        ts.loc[sec_mask] = pd.to_datetime(ts_num.loc[sec_mask], unit="s", utc=True, errors="coerce")
+    other_mask = ts.isna()
+    if bool(other_mask.any()):
+        ts.loc[other_mask] = parse_timestamp_utc(ts_raw.loc[other_mask])
+    local["timestamp_utc"] = ts
+    local["timestamp_utc"] = pd.DatetimeIndex(local["timestamp_utc"]).floor("min")
+    local["price"] = pd.to_numeric(local["price"], errors="coerce")
+    local["volume"] = pd.to_numeric(local["volume"], errors="coerce").abs()
+    local = local.dropna(subset=["timestamp_utc", "price", "volume", "symbol", "venue"]).copy()
+    local = local[(local["price"] > 0) & (local["volume"] > 0)].copy()
+    if local.empty:
+        return local
+    local["weighted_price"] = local["price"] * local["volume"]
+    grouped = local.groupby(["timestamp_utc", "symbol", "venue"], as_index=False).agg(
+        weighted_price=("weighted_price", "sum"),
+        volume=("volume", "sum"),
+    )
+    grouped = grouped[grouped["volume"] > 0].copy()
+    grouped["price"] = grouped["weighted_price"] / grouped["volume"]
+    return grouped[["timestamp_utc", "price", "volume", "symbol", "venue"]]
+
+
+def _load_binance_tick_file(path: Path) -> pd.DataFrame:
+    name = path.name
+    symbol = _infer_symbol_from_filename(name)
+    if symbol is None:
+        return pd.DataFrame()
+
+    if "-aggTrades-" in name:
+        usecols = [1, 2, 5]
+        colnames = ["price", "volume", "timestamp_utc"]
+    elif "-trades-" in name:
+        usecols = [1, 2, 4]
+        colnames = ["price", "volume", "timestamp_utc"]
+    else:
+        return pd.DataFrame()
+
+    chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(
+        path,
+        compression="zip",
+        header=None,
+        usecols=usecols,
+        names=colnames,
+        dtype="string",
+        chunksize=500_000,
+    ):
+        part = chunk.copy()
+        part["symbol"] = f"{symbol}-PERP"
+        part["venue"] = "binance"
+        chunks.append(part)
+
+    if not chunks:
+        return pd.DataFrame()
+    return _aggregate_tick_rows(pd.concat(chunks, ignore_index=True))
+
+
+def _load_bybit_tick_file(path: Path) -> pd.DataFrame:
+    symbol_guess = _infer_symbol_from_filename(path.name)
+    if symbol_guess is None:
+        return pd.DataFrame()
+
+    header = pd.read_csv(path, compression="gzip", nrows=0)
+    cols = {str(col).strip().lower(): str(col) for col in header.columns}
+    ts_col = cols.get("timestamp") or cols.get("time")
+    price_col = cols.get("price")
+    vol_col = cols.get("size") or cols.get("volume") or cols.get("qty")
+    sym_col = cols.get("symbol")
+    if ts_col is None or price_col is None or vol_col is None:
+        return pd.DataFrame()
+
+    usecols = [ts_col, price_col, vol_col] + ([sym_col] if sym_col else [])
+    chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(path, compression="gzip", usecols=usecols, chunksize=500_000):
+        part = pd.DataFrame()
+        part["timestamp_utc"] = chunk[ts_col]
+        part["price"] = chunk[price_col]
+        part["volume"] = chunk[vol_col]
+        if sym_col and sym_col in chunk.columns:
+            part["symbol"] = chunk[sym_col].astype(str).str.upper()
+        else:
+            part["symbol"] = symbol_guess
+        # Bybit public spot files map to spot symbols; derivatives map to perpetual symbols.
+        if "spot_trades" in path.as_posix():
+            part["symbol"] = part["symbol"].astype(str) + "-SPOT"
+        else:
+            part["symbol"] = part["symbol"].astype(str) + "-PERP"
+        part["venue"] = "bybit"
+        chunks.append(part)
+
+    if not chunks:
+        return pd.DataFrame()
+    return _aggregate_tick_rows(pd.concat(chunks, ignore_index=True))
+
+
+def _load_episode_tick_resampled(episode: str, l2_root: Path) -> pd.DataFrame | None:
+    episode_root = l2_root / episode
+    if not episode_root.exists():
+        return None
+
+    tables: list[pd.DataFrame] = []
+    for path in sorted(episode_root.rglob("*")):
+        if not path.is_file():
+            continue
+        name = path.name
+        try:
+            if name.endswith(".zip") and ("-trades-" in name or "-aggTrades-" in name):
+                parsed = _load_binance_tick_file(path)
+            elif name.endswith(".csv.gz") and "bybit" in path.as_posix():
+                parsed = _load_bybit_tick_file(path)
+            else:
+                continue
+        except Exception:
+            continue
+        if not parsed.empty:
+            tables.append(parsed)
+
+    if not tables:
+        return None
+    merged = pd.concat(tables, ignore_index=True)
+    merged = merged.sort_values(["timestamp_utc", "symbol", "venue"]).drop_duplicates(
+        subset=["timestamp_utc", "symbol", "venue"],
+        keep="last",
+    )
+    return _normalize_execution_frame(merged, episode=episode, source="ticks")
+
+
+def _load_binance_bookdepth_file(path: Path) -> pd.DataFrame:
+    name = path.name
+    match = re.match(r"^(?P<sym>[A-Z0-9]+)-bookDepth-\d{4}-\d{2}-\d{2}\.zip$", name)
+    if match is None:
+        return pd.DataFrame()
+    symbol = str(match.group("sym"))
+
+    chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(
+        path,
+        compression="zip",
+        header=None,
+        usecols=[0, 1, 3],
+        names=["timestamp_utc", "percentage", "notional"],
+        dtype="string",
+        chunksize=500_000,
+    ):
+        part = chunk.copy()
+        part["timestamp_utc"] = pd.to_datetime(
+            part["timestamp_utc"].astype("string"),
+            format="%Y-%m-%d %H:%M:%S",
+            utc=True,
+            errors="coerce",
+        )
+        part["timestamp_utc"] = pd.DatetimeIndex(part["timestamp_utc"]).floor("min")
+        part["percentage"] = pd.to_numeric(part["percentage"], errors="coerce")
+        part["notional"] = pd.to_numeric(part["notional"], errors="coerce").abs()
+        part = part.dropna(subset=["timestamp_utc", "percentage", "notional"]).copy()
+        part = part[(part["notional"] > 0) & (part["percentage"].abs().le(1.0))].copy()
+        if part.empty:
+            continue
+        part["symbol"] = f"{symbol}-PERP"
+        part["venue"] = "binance"
+        chunks.append(part)
+
+    if not chunks:
+        return pd.DataFrame()
+    full = pd.concat(chunks, ignore_index=True)
+    grouped = full.groupby(["timestamp_utc", "symbol", "venue"], as_index=False).agg(
+        depth_notional_1pct=("notional", "sum")
+    )
+    return grouped
+
+
+def _load_episode_bookdepth_minute(episode: str, l2_root: Path) -> pd.DataFrame | None:
+    episode_root = l2_root / episode
+    if not episode_root.exists():
+        return None
+    tables: list[pd.DataFrame] = []
+    for path in sorted(episode_root.rglob("*-bookDepth-*.zip")):
+        if not path.is_file():
+            continue
+        try:
+            table = _load_binance_bookdepth_file(path)
+        except Exception:
+            continue
+        if not table.empty:
+            tables.append(table)
+    if not tables:
+        return None
+    merged = pd.concat(tables, ignore_index=True)
+    merged = merged.sort_values(["timestamp_utc", "symbol", "venue"]).drop_duplicates(
+        subset=["timestamp_utc", "symbol", "venue"],
+        keep="last",
+    )
+    return merged
+
+
 def _load_episode_resampled(episode: str, processed_root: Path) -> pd.DataFrame | None:
     path = processed_root / episode / "prices_resampled.csv"
     if not path.exists():
         return None
 
     frame = pd.read_csv(path)
-    required = {"timestamp_utc", "price", "volume", "symbol", "venue"}
-    if not required.issubset(set(frame.columns)):
+    out = _normalize_execution_frame(frame, episode=episode, source="bars")
+    if out.empty:
         return None
-
-    frame["timestamp_utc"] = pd.to_datetime(frame["timestamp_utc"], utc=True, errors="coerce")
-    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
-    frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce")
-    frame["symbol"] = frame["symbol"].astype(str)
-    frame["venue"] = frame["venue"].astype(str)
-    frame = frame.dropna(subset=["timestamp_utc", "price", "symbol", "venue"]).copy()
-    frame = frame[frame["price"] > 0].copy()
-    frame["episode"] = episode
-
-    parsed = frame["symbol"].map(_parse_symbol)
-    frame["root"] = parsed.map(lambda x: x[0] if x else None)
-    frame["quote"] = parsed.map(lambda x: x[1] if x else None)
-    frame["suffix"] = parsed.map(lambda x: x[2] if x else None)
-    frame["market_type"] = frame["suffix"].map(_market_type_from_suffix)
-    frame = frame[frame["quote"].isin(["USDC", "USDT"])].copy()
-    frame = frame[frame["market_type"].isin(["spot", "derivatives"])].copy()
-    return frame
+    return out
 
 
 def build_enriched_trade_frame(
@@ -265,6 +523,12 @@ def build_enriched_trade_frame(
         )
         g["rolling_median_volume"] = rolling_med_vol
         g["rel_size"] = g["volume"] / rolling_med_vol
+        if "depth_notional_1pct" in g.columns:
+            depth = pd.to_numeric(g["depth_notional_1pct"], errors="coerce")
+            trade_notional = (g["price"].astype(float) * g["volume"].astype(float)).abs()
+            g["rel_size_depth"] = trade_notional / depth
+            g.loc[depth.le(0), "rel_size_depth"] = np.nan
+            g["rel_size"] = g["rel_size_depth"].where(g["rel_size_depth"].notna(), g["rel_size"])
         g.loc[~np.isfinite(g["rel_size"]), "rel_size"] = np.nan
         rows.append(g)
 
@@ -544,52 +808,82 @@ def main() -> None:
     l2_coverage = build_l2_coverage(list(args.episodes), l2_root)
     l2_coverage.to_csv(coverage_path, index=False)
     missing_l2 = l2_coverage[~l2_coverage["l2_ready"].astype(bool)].copy()
+    ready_l2 = l2_coverage[l2_coverage["l2_ready"].astype(bool)].copy()
+
+    selected_episodes = list(args.episodes)
+    partial_l2_mode = False
 
     if (not args.allow_bar_proxy_without_l2) and (not missing_l2.empty):
-        _empty_table(SLIPPAGE_COLUMNS).to_csv(slippage_path, index=False)
-        _empty_table(COMPARISON_COLUMNS).to_csv(comparison_path, index=False)
-        _empty_table(RESILIENCE_COLUMNS).to_csv(resilience_path, index=False)
-        _empty_table(VENUE_COLUMNS).to_csv(venue_path, index=False)
+        if not ready_l2.empty:
+            selected_episodes = ready_l2["episode"].astype(str).tolist()
+            partial_l2_mode = True
+        else:
+            _empty_table(SLIPPAGE_COLUMNS).to_csv(slippage_path, index=False)
+            _empty_table(COMPARISON_COLUMNS).to_csv(comparison_path, index=False)
+            _empty_table(RESILIENCE_COLUMNS).to_csv(resilience_path, index=False)
+            _empty_table(VENUE_COLUMNS).to_csv(venue_path, index=False)
 
-        with report_path.open("w", encoding="utf-8") as handle:
-            handle.write("# Execution Diagnostics Blocked (L2 Missing)\n\n")
-            handle.write(
-                "Execution-quality conclusions are disabled because required L2 orderbook + tick-trade "
-                "coverage is incomplete for selected episodes.\n\n"
-            )
-            handle.write("## L2 Coverage\n\n")
-            handle.write("```text\n")
-            handle.write(l2_coverage.to_string(index=False))
-            handle.write("\n```\n")
-            handle.write(
-                "\nNo bar-proxy fallback was produced because `--allow-bar-proxy-without-l2` was not set.\n"
-            )
-            handle.write(
-                "This fail-closed behavior prevents unsupported venue/quote liquidity rankings.\n"
-            )
-            handle.write("\n## Artifacts\n\n")
-            handle.write(f"- `{coverage_path}`\n")
-            handle.write(f"- `{slippage_path}`\n")
-            handle.write(f"- `{comparison_path}`\n")
-            handle.write(f"- `{resilience_path}`\n")
-            handle.write(f"- `{venue_path}`\n")
+            with report_path.open("w", encoding="utf-8") as handle:
+                handle.write("# Execution Diagnostics Blocked (L2 Missing)\n\n")
+                handle.write(
+                    "Execution-quality conclusions are disabled because required L2 orderbook + tick-trade "
+                    "coverage is incomplete for selected episodes.\n\n"
+                )
+                handle.write("## L2 Coverage\n\n")
+                handle.write("```text\n")
+                handle.write(l2_coverage.to_string(index=False))
+                handle.write("\n```\n")
+                handle.write(
+                    "\nNo bar-proxy fallback was produced because `--allow-bar-proxy-without-l2` was not set.\n"
+                )
+                handle.write(
+                    "This fail-closed behavior prevents unsupported venue/quote liquidity rankings.\n"
+                )
+                handle.write("\n## Artifacts\n\n")
+                handle.write(f"- `{coverage_path}`\n")
+                handle.write(f"- `{slippage_path}`\n")
+                handle.write(f"- `{comparison_path}`\n")
+                handle.write(f"- `{resilience_path}`\n")
+                handle.write(f"- `{venue_path}`\n")
 
-        print("Execution diagnostics blocked: missing L2/tick inputs for at least one episode.")
-        print(f"- l2_coverage: {coverage_path}")
-        print(f"- report: {report_path}")
-        return
+            print("Execution diagnostics blocked: missing L2/tick inputs for all selected episodes.")
+            print(f"- l2_coverage: {coverage_path}")
+            print(f"- report: {report_path}")
+            return
 
     frames: list[pd.DataFrame] = []
     missing: list[str] = []
-    for episode in args.episodes:
-        frame = _load_episode_resampled(episode, processed_root)
-        if frame is None or frame.empty:
+    for episode in selected_episodes:
+        bars = _load_episode_resampled(episode, processed_root)
+        ticks = _load_episode_tick_resampled(episode, l2_root)
+        depth = _load_episode_bookdepth_minute(episode, l2_root)
+
+        has_bars = bars is not None and (not bars.empty)
+        has_ticks = ticks is not None and (not ticks.empty)
+        if (not has_bars) and (not has_ticks):
             missing.append(episode)
             continue
+
+        if has_bars and has_ticks:
+            merged = pd.concat([bars, ticks], ignore_index=True)
+            merged = merged.sort_values(["timestamp_utc", "symbol", "venue", "execution_source"]).drop_duplicates(
+                subset=["timestamp_utc", "symbol", "venue", "episode"],
+                keep="last",
+            )
+            frame = merged
+        elif has_ticks:
+            frame = ticks
+        else:
+            frame = bars
+
+        if depth is not None and not depth.empty:
+            frame = frame.merge(depth, on=["timestamp_utc", "symbol", "venue"], how="left")
         frames.append(frame)
 
     if not frames:
-        raise FileNotFoundError("No valid episode resampled files were found for execution diagnostics.")
+        raise FileNotFoundError(
+            f"No valid episode resampled files were found for execution diagnostics. selected={selected_episodes}"
+        )
 
     raw = pd.concat(frames, ignore_index=True)
     enriched = build_enriched_trade_frame(
@@ -618,9 +912,19 @@ def main() -> None:
     with report_path.open("w", encoding="utf-8") as handle:
         handle.write("# Execution Proxy Diagnostics (Bar-Level)\n\n")
         handle.write("This report extends stablecoin analysis with bar-level execution proxies.\n\n")
+        if partial_l2_mode:
+            handle.write(
+                "Partial-L2 mode: only episodes with both orderbook+tick coverage were included "
+                "because `--allow-bar-proxy-without-l2` was not set.\n\n"
+            )
         handle.write("## Scope\n\n")
-        for ep in args.episodes:
+        for ep in selected_episodes:
             handle.write(f"- `{ep}`\n")
+        skipped_l2 = sorted(set(args.episodes) - set(selected_episodes))
+        if skipped_l2:
+            handle.write("\nSkipped due to missing L2 coverage:\n")
+            for ep in skipped_l2:
+                handle.write(f"- `{ep}`\n")
         if missing:
             handle.write("\nMissing episodes (skipped):\n")
             for ep in missing:
@@ -635,8 +939,18 @@ def main() -> None:
         )
 
         handle.write("\n## Method Notes\n\n")
-        handle.write("- Data source: `prices_resampled.csv` (price + volume bars).\n")
-        handle.write("- Slippage proxy: next-bar absolute return (bps) conditioned on relative size (`volume / rolling median volume`).\n")
+        handle.write(
+            "- Data source: `prices_resampled.csv` bars, with per-minute tick-trade aggregation "
+            "overlays when local `data/processed/orderbook/<episode>/...` trade files are available.\n"
+        )
+        handle.write(
+            "- When Binance `bookDepth` snapshots are available, relative size uses "
+            "`trade_notional / depth_notional_1pct` (fallback to rolling-volume scale otherwise).\n"
+        )
+        handle.write(
+            "- Slippage proxy: next-bar absolute return (bps) conditioned on `rel_size` "
+            "(depth-scaled when available, otherwise volume-scaled).\n"
+        )
         handle.write(
             "- Volatility control: report large-size deltas in raw bps, excess bps (`next_bar_abs_ret - local_median_abs_ret`), "
             "and normalized units (`next_bar_abs_ret / local_median_abs_ret`).\n"

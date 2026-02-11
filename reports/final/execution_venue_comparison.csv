@@ -1,1 +1,2 @@
 venue,market_type,n_root_episode_pairs,mean_delta_large_raw_bps,median_delta_large_raw_bps,mean_delta_large_excess_bps,median_delta_large_excess_bps,mean_delta_large_norm,median_delta_large_norm,n_indeterminate_norm,median_recovery_bars_usdc,median_recovery_bars_usdt,mean_unrecovered_ratio_usdc,mean_unrecovered_ratio_usdt
+binance,derivatives,3,-0.9721220072379442,-0.9319785227134147,-0.5958776804889254,-0.5209731039406007,-0.03453546926726866,-0.047317834156545,2,4.0,4.5,0.0,0.0028735632183908046

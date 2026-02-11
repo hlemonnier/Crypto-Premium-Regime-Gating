@@ -65,6 +65,7 @@ src/
   strategy.py         # Trade/Widen/Risk-off decision logic
   backtest.py         # naive vs gated backtest + metrics
   ablation_report.py  # single-command ablation ladder report
+  execution_data.py   # public execution dataset bootstrap (orderbook/trades)
   execution_quality.py # slippage/resilience proxy diagnostics from bar+volume data
   plots.py            # Figure 1/2/3 exports
   pipeline.py         # end-to-end runner
@@ -297,6 +298,16 @@ Proxy availability note:
 
 ## Execution quality diagnostics (slippage proxy + resilience)
 
+Bootstrap publicly available execution datasets (orderbook/trades where available) into
+`data/processed/orderbook/<episode>/...`:
+
+```bash
+python -m src.execution_data \
+  --episodes bybit_usdc_depeg_2023 okx_usdc_depeg_2023 march_vol_2024_binance yen_unwind_2024_binance yen_followthrough_2024_binance \
+  --skip-existing \
+  --include-agg-trades
+```
+
 Build execution diagnostics from `prices_resampled.csv` (price + volume bars):
 
 ```bash
@@ -305,7 +316,8 @@ python -m src.execution_quality --output-dir reports/final
 
 Fail-closed behavior:
 
-- by default, execution conclusions are blocked unless each episode has both L2 orderbook + tick-trade inputs under `data/processed/orderbook/<episode>/...`.
+- by default, execution conclusions are blocked only if **none** of the selected episodes has both orderbook + tick-trade inputs under `data/processed/orderbook/<episode>/...`.
+- if only a subset has full coverage, diagnostics run in partial-L2 mode on covered episodes only and report skipped episodes explicitly.
 - to force bar-proxy diagnostics when L2 is missing (not recommended for venue/quote ranking), pass:
 
 ```bash

@@ -663,6 +663,18 @@ class ExecutionProxyTests(unittest.TestCase):
             self.assertEqual(coverage.shape[0], 2)
             self.assertFalse(bool(coverage["l2_ready"].astype(bool).any()))
 
+    def test_l2_coverage_detects_zip_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            episode_root = Path(tmp_dir) / "ep_a"
+            episode_root.mkdir(parents=True, exist_ok=True)
+            (episode_root / "BTCUSDT-bookDepth-2024-08-05.zip").write_bytes(b"zip")
+            (episode_root / "BTCUSDT-trades-2024-08-05.zip").write_bytes(b"zip")
+            coverage = build_l2_coverage(["ep_a"], Path(tmp_dir))
+            self.assertEqual(coverage.shape[0], 1)
+            self.assertTrue(bool(coverage.loc[0, "l2_orderbook_available"]))
+            self.assertTrue(bool(coverage.loc[0, "tick_trades_available"]))
+            self.assertTrue(bool(coverage.loc[0, "l2_ready"]))
+
 
 if __name__ == "__main__":
     unittest.main()
