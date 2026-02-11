@@ -104,5 +104,9 @@ Report:
 - regime segments should not flip every minute
 - depeg_flag should fire on USDC SVB window (10-11 Mar 2023) if data covers it
 
+## 9) Commit name requirement
+- Every time the agent generates or modifies something, it must also provide an associated commit name describing that exact change.
+- Preferred format: `<type>: <short-description>` (example: `feat: add regime gating decision thresholds`).
+
 ---
-Last updated: 2026-02-09
+Last updated: 2026-02-11
