@@ -7,11 +7,12 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from src.backtest import run_backtest
+from src.backtest import periods_per_year_from_freq, run_backtest
 from src.onchain import empty_onchain_frame
 from src.pipeline import load_price_matrix
 from src.premium import PremiumConfig, build_premium_frame
 from src.regimes import build_regime_score
+from src.robust_filter import robust_filter
 from src.thresholds import quantile_threshold
 
 
@@ -92,6 +93,38 @@ class NoLookaheadTests(unittest.TestCase):
         self.assertEqual(float(score.iloc[3]), 0.0)
         self.assertGreater(float(score.iloc[4]), 1e6)
 
+    def test_robust_filter_dynamic_floor_is_causal(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=240, freq="1min", tz="UTC")
+        calm = np.sin(np.linspace(0.0, 8.0, 120)) * 1e-4
+        stressed = np.sin(np.linspace(0.0, 40.0, 120)) * 0.5
+        premium = pd.Series(np.concatenate([calm, stressed]), index=idx, name="premium")
+
+        full = robust_filter(
+            premium,
+            window_obs=20,
+            z_threshold=3.0,
+            sigma_floor=1e-6,
+            min_period_fraction=0.25,
+        )
+        prefix = robust_filter(
+            premium.iloc[:120],
+            window_obs=20,
+            z_threshold=3.0,
+            sigma_floor=1e-6,
+            min_period_fraction=0.25,
+        )
+
+        np.testing.assert_allclose(
+            full["sigma_hat"].iloc[:120].to_numpy(dtype=float),
+            prefix["sigma_hat"].to_numpy(dtype=float),
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            full["z_t"].iloc[:120].to_numpy(dtype=float),
+            prefix["z_t"].to_numpy(dtype=float),
+            equal_nan=True,
+        )
+
 
 class HitRateTests(unittest.TestCase):
     def test_hit_rate_counts_only_active_position_bars(self) -> None:
@@ -116,6 +149,38 @@ class HitRateTests(unittest.TestCase):
         # Non-active bars should not pollute hit-rate.
         wrong_legacy = (log["net_pnl"].where(log["position"].shift(1).abs() > 0) > 0).mean()
         self.assertLess(float(wrong_legacy), float(metrics["hit_rate"]))
+
+    def test_sharpe_reports_full_series_and_active_variants(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=6, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 0.2, -0.1, 0.25, -0.15, 0.3], index=idx, name="premium")
+        decision = pd.Series(["Widen", "Trade", "Widen", "Trade", "Widen", "Widen"], index=idx, name="decision")
+        m_t = pd.Series([0.0, 1.0, 0.0, -1.0, 0.0, 0.0], index=idx, name="m_t")
+
+        log, metrics = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_mode="one_bar",
+        )
+
+        net = log["net_pnl"].astype(float)
+        in_market = log["position"].shift(1).abs() > 0
+        active = net.loc[in_market & net.notna()]
+
+        full_std = float(net.std(ddof=0))
+        active_std = float(active.std(ddof=0))
+        expected_full = float(net.mean() / full_std) if full_std > 0 else 0.0
+        expected_active = float(active.mean() / active_std) if active_std > 0 else 0.0
+        annualization = float(np.sqrt(periods_per_year_from_freq("1min")))
+
+        self.assertAlmostEqual(float(metrics["sharpe"]), expected_full, places=12)
+        self.assertAlmostEqual(float(metrics["sharpe_active"]), expected_active, places=12)
+        self.assertAlmostEqual(float(metrics["sharpe_full_annualized"]), expected_full * annualization, places=9)
+        self.assertAlmostEqual(float(metrics["sharpe_active_annualized"]), expected_active * annualization, places=9)
+        self.assertEqual(int(metrics["n_bars"]), len(log))
+        self.assertEqual(int(metrics["n_active_bars"]), int((in_market & net.notna()).sum()))
 
 
 class StatefulExitTests(unittest.TestCase):

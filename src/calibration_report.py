@@ -102,9 +102,9 @@ def main() -> None:
         row = {
             "episode": episode,
             "matrix_path": str(matrix_path),
-            "baseline_gated_sharpe": float(base_g["sharpe"]),
-            "tuned_gated_sharpe": float(tuned_g["sharpe"]),
-            "delta_gated_sharpe": float(tuned_g["sharpe"] - base_g["sharpe"]),
+            "baseline_gated_sharpe_full_raw": float(base_g["sharpe"]),
+            "tuned_gated_sharpe_full_raw": float(tuned_g["sharpe"]),
+            "delta_gated_sharpe_full_raw": float(tuned_g["sharpe"] - base_g["sharpe"]),
             "baseline_gated_pnl_net": float(base_g["pnl_net"]),
             "tuned_gated_pnl_net": float(tuned_g["pnl_net"]),
             "delta_gated_pnl_net": float(tuned_g["pnl_net"] - base_g["pnl_net"]),
@@ -153,6 +153,7 @@ def main() -> None:
     with md_path.open("w", encoding="utf-8") as handle:
         handle.write("# Calibration Report\n\n")
         handle.write("Comparison: baseline Notice defaults vs tuned config on 2024 episodes.\n\n")
+        handle.write("Metric naming: `*_sharpe_full_raw` denotes full-series, non-annualized Sharpe.\n\n")
         handle.write("## Tuned Parameters\n\n")
         for key, value in tuned_params.items():
             handle.write(f"- `{key}`: `{value}`\n")

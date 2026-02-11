@@ -131,9 +131,28 @@ def main() -> None:
         raise FileNotFoundError("No episode metrics found for selected episodes.")
 
     long_metrics = pd.concat(metric_frames, ignore_index=True)
-    long_metrics = long_metrics[
-        ["episode", "variant", "sharpe", "pnl_net", "max_drawdown", "turnover", "flip_rate", "active_ratio", "hit_rate"]
+    base_cols = [
+        "episode",
+        "variant",
+        "sharpe",
+        "pnl_net",
+        "max_drawdown",
+        "turnover",
+        "flip_rate",
+        "active_ratio",
+        "hit_rate",
+        "n_bars",
+        "n_active_bars",
+        "horizon_days",
     ]
+    optional_cols = [
+        "sharpe_full_annualized",
+        "sharpe_active",
+        "sharpe_active_annualized",
+        "annualization_factor",
+    ]
+    selected_cols = [col for col in base_cols + optional_cols if col in long_metrics.columns]
+    long_metrics = long_metrics[selected_cols]
     long_path = output_dir / "final_episode_metrics_long.csv"
     long_metrics.to_csv(long_path, index=False)
 
@@ -175,10 +194,17 @@ def main() -> None:
         handle.write("```text\n")
         handle.write(gated.to_string(index=False))
         handle.write("\n```\n")
+        handle.write(
+            "\nMetric convention: `sharpe` is full-series and non-annualized. "
+            "Annualized Sharpe columns are exported for reference only.\n"
+        )
 
         if "sharpe_gated" in wide_for_plot.columns and "sharpe_naive" in wide_for_plot.columns:
             sharpe_delta_mean = float((wide_for_plot["sharpe_gated"] - wide_for_plot["sharpe_naive"]).mean())
-            handle.write(f"\n- Mean Sharpe delta (gated - naive): `{sharpe_delta_mean:.4f}`\n")
+            handle.write(
+                f"\n- Mean Sharpe delta (gated - naive, full-series non-annualized): "
+                f"`{sharpe_delta_mean:.4f}`\n"
+            )
 
         if not onchain_df.empty:
             handle.write("\n## On-Chain Validation Snapshot\n\n")

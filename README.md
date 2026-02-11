@@ -291,6 +291,10 @@ python -m src.calibration_report \
   --output-dir reports/final
 ```
 
+Calibration/tuning Sharpe naming convention:
+
+- `*_sharpe_full_raw` = full-series, non-annualized Sharpe.
+
 Build final polished pack (consolidated CSV + comparison figures + executive summary):
 
 ```bash
@@ -320,6 +324,9 @@ Main final artifacts:
 - `reports/figures/figure_3_phase_space.png`
 
 Metric convention in `metrics.csv`:
+- `sharpe` is computed on the full `net_pnl` series and is **non-annualized** (primary score for short episodes).
+- `sharpe_full_annualized` and `sharpe_active_annualized` are exported for reference only; short windows can produce unstable annualized values.
+- `sharpe_active` is computed on active position bars only (`position[t-1] != 0`) for diagnostics.
 - `hit_rate` is computed only on active position bars (`position[t-1] != 0`).
 
 ## Decision policy implemented
@@ -341,6 +348,8 @@ Backtest execution policy (default):
 - hold at least `min_holding_bars` after entry, then exit on `Widen`
 - exit immediately on `Risk-off` or mean-reversion (`m_t` crossing 0 versus held side)
 - turnover/costs include entries, exits, and flips (`|Δposition|`)
+- PnL convention: `gross_pnl[t] = position[t-1] * (-(premium[t]-premium[t-1]))` on log-premium.
+  This corresponds to mean-reversion on the premium spread (`short premium` profits when premium narrows).
 
 ## Fixed episodes to evaluate
 

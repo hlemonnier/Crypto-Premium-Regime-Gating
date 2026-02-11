@@ -72,7 +72,7 @@ def evaluate_combo(
     cfg["regimes"]["stress_quantile"] = combo["stress_quantile"]
     cfg["regimes"]["recovery_quantile"] = combo["recovery_quantile"]
 
-    sharpes: list[float] = []
+    sharpes_full_raw: list[float] = []
     pnls: list[float] = []
     actives: list[float] = []
     turnovers: list[float] = []
@@ -80,29 +80,29 @@ def evaluate_combo(
     for _, matrix in matrices.items():
         results = run_pipeline(cfg, matrix)
         gated = results["metrics"].loc["gated"]
-        sharpes.append(float(gated["sharpe"]))
+        sharpes_full_raw.append(float(gated["sharpe"]))
         pnls.append(float(gated["pnl_net"]))
         actives.append(float(gated["active_ratio"]))
         turnovers.append(float(gated["turnover"]))
 
-    mean_sharpe = float(np.mean(sharpes))
-    std_sharpe = float(np.std(sharpes))
-    min_sharpe = float(np.min(sharpes))
+    mean_sharpe_full_raw = float(np.mean(sharpes_full_raw))
+    std_sharpe_full_raw = float(np.std(sharpes_full_raw))
+    min_sharpe_full_raw = float(np.min(sharpes_full_raw))
     mean_pnl = float(np.mean(pnls))
     mean_active = float(np.mean(actives))
     mean_turnover = float(np.mean(turnovers))
 
-    # Objective: improve Sharpe while penalizing unstable cross-episode behavior and dead strategies.
-    score = mean_sharpe - 0.25 * std_sharpe + 25.0 * mean_pnl
+    # Objective: improve full-series raw Sharpe while penalizing instability/dead strategies.
+    score = mean_sharpe_full_raw - 0.25 * std_sharpe_full_raw + 25.0 * mean_pnl
     if mean_active < min_active_ratio:
         score -= 50.0
 
     return {
         **combo,
         "score": score,
-        "mean_sharpe": mean_sharpe,
-        "std_sharpe": std_sharpe,
-        "min_sharpe": min_sharpe,
+        "mean_sharpe_full_raw": mean_sharpe_full_raw,
+        "std_sharpe_full_raw": std_sharpe_full_raw,
+        "min_sharpe_full_raw": min_sharpe_full_raw,
         "mean_pnl_net": mean_pnl,
         "mean_active_ratio": mean_active,
         "mean_turnover": mean_turnover,
@@ -212,7 +212,7 @@ def main() -> None:
         if i % 25 == 0 or i == len(combos):
             print(f"- progress: {i}/{len(combos)}")
 
-    table = pd.DataFrame(rows).sort_values(["score", "mean_sharpe"], ascending=False).reset_index(drop=True)
+    table = pd.DataFrame(rows).sort_values(["score", "mean_sharpe_full_raw"], ascending=False).reset_index(drop=True)
     print("Top combinations:")
     print(table.head(args.top).to_string(index=False))
 

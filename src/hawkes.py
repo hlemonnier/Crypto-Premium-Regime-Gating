@@ -205,7 +205,7 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
 
         intensity = params.mu + params.alpha * excitation
         lambda_t.loc[ts] = intensity
-        n_t.loc[ts] = min(params.branching_ratio, 0.999)
+        n_t.loc[ts] = params.branching_ratio
         mu_t.loc[ts] = params.mu
         alpha_t.loc[ts] = params.alpha
         beta_t.loc[ts] = params.beta

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -212,14 +212,7 @@ def main() -> None:
 
     if not args.skip_hawkes:
         hawkes_cfg = _build_dataclass(HawkesConfig, config.get("hawkes"))
-        hawkes_cfg = HawkesConfig(
-            enabled=True,
-            warmup=hawkes_cfg.warmup,
-            rolling_window=hawkes_cfg.rolling_window,
-            refit_interval=hawkes_cfg.refit_interval,
-            stability_epsilon=hawkes_cfg.stability_epsilon,
-            min_events_for_fit=hawkes_cfg.min_events_for_fit,
-        )
+        hawkes_cfg = replace(hawkes_cfg, enabled=True)
         hawkes_frame = estimate_hawkes_rolling(robust_frame["event"], hawkes_cfg)
         hawkes_decision_frame = build_decisions(
             m_t=m_t,

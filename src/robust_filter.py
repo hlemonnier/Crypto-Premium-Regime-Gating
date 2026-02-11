@@ -43,14 +43,20 @@ def robust_filter(
         "sigma_hat"
     )
 
-    finite_sigma = sigma_hat[np.isfinite(sigma_hat)]
-    dynamic_floor = (
-        float(np.nanpercentile(finite_sigma.to_numpy(), 5) * 0.25)
-        if finite_sigma.shape[0] >= 20
-        else sigma_floor
+    # Causal floor: at time t we only use sigma history up to t-1.
+    dynamic_floor = sigma_hat.expanding(min_periods=20).quantile(0.05).shift(1).mul(0.25)
+    floor = dynamic_floor.fillna(sigma_floor).clip(lower=max(sigma_floor, 1e-12))
+    sigma_values = sigma_hat.to_numpy(dtype=float)
+    floor_values = floor.to_numpy(dtype=float)
+    sigma_hat = pd.Series(
+        np.where(
+            np.isfinite(sigma_values),
+            np.maximum(sigma_values, floor_values),
+            np.nan,
+        ),
+        index=sigma_hat.index,
+        name="sigma_hat",
     )
-    floor = max(sigma_floor, dynamic_floor, 1e-12)
-    sigma_hat = sigma_hat.clip(lower=floor)
 
     z_t = ((p - p_smooth) / sigma_hat).rename("z_t")
     events = z_t.abs().gt(z_threshold).fillna(False).rename("event")

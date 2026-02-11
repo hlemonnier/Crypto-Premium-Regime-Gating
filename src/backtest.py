@@ -25,6 +25,19 @@ def periods_per_year_from_freq(freq: str) -> float:
     return (365.25 * 24 * 3600) / seconds
 
 
+def _sharpe_ratio(pnl: pd.Series) -> float:
+    clean = pnl.loc[pnl.notna()].astype(float)
+    if clean.empty:
+        return 0.0
+    std = float(clean.std(ddof=0))
+    if not np.isfinite(std) or std <= 0:
+        return 0.0
+    mean = float(clean.mean())
+    if not np.isfinite(mean):
+        return 0.0
+    return mean / std
+
+
 def _position_from_trade_signal(decision_i: object, m_i: float) -> float:
     if str(decision_i) != "Trade" or not np.isfinite(m_i):
         return 0.0
@@ -206,10 +219,11 @@ def run_backtest(
     in_market = pos.shift(1).abs() > 0
     active_mask = in_market & net_pnl.notna()
     pnl_when_active = net_pnl.loc[active_mask]
-    active_std = float(pnl_when_active.std(ddof=0)) if not pnl_when_active.empty else 0.0
     annualization = np.sqrt(periods_per_year_from_freq(freq))
-
-    sharpe = float((pnl_when_active.mean() / active_std) * annualization) if active_std > 0 else 0.0
+    sharpe_full = _sharpe_ratio(net_pnl)
+    sharpe_full_annualized = float(sharpe_full * annualization)
+    sharpe_active = _sharpe_ratio(pnl_when_active)
+    sharpe_active_annualized = float(sharpe_active * annualization)
     hit_rate = float((pnl_when_active > 0).mean()) if not pnl_when_active.empty else 0.0
     decision_flip = decision.ne(decision.shift(1))
     if not decision_flip.empty:
@@ -223,8 +237,17 @@ def run_backtest(
     if not np.isfinite(avg_holding):
         avg_holding = 0.0
 
+    horizon_days = 0.0
+    if len(p.index) > 1:
+        horizon_seconds = (p.index[-1] - p.index[0]).total_seconds()
+        horizon_days = float(max(horizon_seconds, 0.0) / (24 * 3600))
+
     metrics = {
-        "sharpe": sharpe,
+        # Primary Sharpe is full-series and non-annualized for short-horizon comparability.
+        "sharpe": sharpe_full,
+        "sharpe_full_annualized": sharpe_full_annualized,
+        "sharpe_active": sharpe_active,
+        "sharpe_active_annualized": sharpe_active_annualized,
         "max_drawdown": float(drawdown.min()),
         "turnover": float(turnover.sum()),
         "pnl_net": float(net_pnl.sum()),
@@ -233,6 +256,10 @@ def run_backtest(
         "active_ratio": float(in_market.mean()),
         "position_flip_rate": float(position_flip.mean()),
         "avg_holding_bars": avg_holding,
+        "n_bars": int(len(net_pnl)),
+        "n_active_bars": int(active_mask.sum()),
+        "horizon_days": horizon_days,
+        "annualization_factor": float(annualization),
     }
     return out, metrics
 
