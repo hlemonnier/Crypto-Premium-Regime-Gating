@@ -8,11 +8,14 @@ import numpy as np
 import pandas as pd
 
 from src.backtest import periods_per_year_from_freq, run_backtest
-from src.onchain import empty_onchain_frame
+from src.bybit_data import bybit_interval_to_ms
+from src.data_ingest import _remove_glitches
+from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.pipeline import load_price_matrix
 from src.premium import PremiumConfig, build_premium_frame
 from src.regimes import build_regime_score
 from src.robust_filter import robust_filter
+from src.strategy import StrategyConfig, build_decisions
 from src.thresholds import quantile_threshold
 
 
@@ -206,6 +209,43 @@ class StatefulExitTests(unittest.TestCase):
         self.assertEqual(int((log["position_event"] == "Exit").sum()), 2)
 
 
+class HawkesAdaptiveThresholdTests(unittest.TestCase):
+    def test_adaptive_hawkes_thresholds_generate_causal_signals(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=10, freq="1min", tz="UTC")
+        n_t = pd.Series([0.01, 0.03, 0.02, 0.05, 0.08, 0.06, 0.10, 0.12, 0.15, 0.20], index=idx, name="n_t")
+        m_t = pd.Series([0.0] * len(idx), index=idx, name="m_t")
+        T_t = pd.Series([1.0] * len(idx), index=idx, name="T_t")
+        chi_t = pd.Series([0.0] * len(idx), index=idx, name="chi_t")
+        sigma_hat = pd.Series([1.0] * len(idx), index=idx, name="sigma_hat")
+        regime = pd.Series(["transient"] * len(idx), index=idx, name="regime")
+        depeg_flag = pd.Series([False] * len(idx), index=idx, name="depeg_flag")
+        cfg = StrategyConfig(
+            entry_k=10.0,
+            hawkes_threshold_mode="expanding",
+            hawkes_threshold_min_periods=3,
+            hawkes_widen_quantile=0.6,
+            hawkes_risk_off_quantile=0.9,
+        )
+
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=sigma_hat,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            n_t=n_t,
+            cfg=cfg,
+        )
+
+        self.assertIn("hawkes_widen_threshold", out.columns)
+        self.assertIn("hawkes_riskoff_threshold", out.columns)
+        self.assertIn("hawkes_widen_signal", out.columns)
+        self.assertIn("hawkes_riskoff_signal", out.columns)
+        self.assertTrue(out["hawkes_widen_signal"].iloc[5:].any())
+        self.assertTrue(out["hawkes_riskoff_signal"].iloc[7:].any())
+
+
 class PriceMatrixLoaderTests(unittest.TestCase):
     def test_loader_drops_nat_and_duplicate_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -241,6 +281,60 @@ class OnchainColumnsTests(unittest.TestCase):
         self.assertIn("onchain_usdt_minus_1", frame.columns)
         self.assertIn("onchain_log_usdc_dev", frame.columns)
         self.assertIn("onchain_log_usdt_dev", frame.columns)
+
+
+class BybitIntervalTests(unittest.TestCase):
+    def test_daily_and_weekly_intervals_map_to_ms(self) -> None:
+        self.assertEqual(bybit_interval_to_ms("D"), 86_400_000)
+        self.assertEqual(bybit_interval_to_ms("W"), 604_800_000)
+
+
+class OnchainCadenceTests(unittest.TestCase):
+    def test_onchain_depeg_persistence_uses_source_daily_cadence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "onchain.csv"
+            daily = pd.DataFrame(
+                {
+                    "timestamp_utc": [
+                        "2024-03-12T00:00:00Z",
+                        "2024-03-13T00:00:00Z",
+                    ],
+                    "onchain_usdc_price": [1.0, 1.0],
+                    "onchain_usdt_price": [1.01, 1.01],  # persistent daily excursion
+                }
+            )
+            daily.to_csv(cache_path, index=False)
+
+            idx = pd.date_range("2024-03-12", periods=2 * 24 * 60, freq="1min", tz="UTC")
+            stablecoin_proxy = pd.Series(0.0, index=idx, name="stablecoin_proxy")
+            cfg = OnchainConfig(
+                cache_path=str(cache_path),
+                depeg_delta_log=0.005,
+                depeg_min_consecutive=5,  # 5 daily observations required
+                cache_max_age_hours=24 * 365,
+            )
+
+            frame = build_onchain_validation_frame(index=idx, stablecoin_proxy=stablecoin_proxy, cfg=cfg)
+            self.assertEqual(int(frame["onchain_depeg_flag"].sum()), 0)
+
+
+class GlitchFilterTests(unittest.TestCase):
+    def test_glitch_filter_is_centered_on_robust_location(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=40, freq="1min", tz="UTC")
+        drift = np.linspace(0.0, 0.004, 39)
+        log_ret = 0.20 + drift
+        prices = np.exp(np.concatenate([[0.0], np.cumsum(log_ret)]))
+        raw = pd.DataFrame(
+            {
+                "timestamp_utc": idx,
+                "symbol": "BTCUSDT-PERP",
+                "price": prices,
+            }
+        )
+
+        filtered = _remove_glitches(raw, sigma_threshold=2.0)
+        # A smooth, shifted return process should not be aggressively removed.
+        self.assertGreaterEqual(filtered.shape[0], 35)
 
 
 if __name__ == "__main__":

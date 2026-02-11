@@ -49,7 +49,10 @@ def daterange(start: date, end: date) -> list[date]:
 def bybit_interval_to_ms(interval: str) -> int:
     if interval.isdigit():
         return int(interval) * 60_000
-    mapping = {"D": 24 * 60_000, "W": 7 * 24 * 60_000}
+    mapping = {
+        "D": 24 * 60 * 60 * 1000,
+        "W": 7 * 24 * 60 * 60 * 1000,
+    }
     if interval in mapping:
         return mapping[interval]
     raise ValueError(f"Unsupported Bybit interval: {interval}")

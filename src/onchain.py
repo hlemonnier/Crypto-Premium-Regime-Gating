@@ -136,6 +136,22 @@ def build_onchain_validation_frame(
         return empty_onchain_frame(index)
 
     onchain = daily.set_index("timestamp_utc").sort_index()
+    daily_usdc = onchain["onchain_usdc_price"].astype(float)
+    daily_usdt = onchain["onchain_usdt_price"].astype(float)
+    daily_proxy = pd.Series(np.nan, index=onchain.index, dtype=float, name="onchain_proxy")
+    daily_valid = daily_usdc.gt(0) & daily_usdt.gt(0)
+    daily_proxy.loc[daily_valid] = np.log(daily_usdt.loc[daily_valid]) - np.log(daily_usdc.loc[daily_valid])
+
+    # Depeg persistence must be computed at the native on-chain sampling cadence
+    # (daily for DefiLlama), not at the pipeline bar frequency after forward-fill.
+    daily_excursion = daily_proxy.abs().ge(cfg.depeg_delta_log)
+    daily_depeg_flag = (
+        daily_excursion.rolling(cfg.depeg_min_consecutive, min_periods=cfg.depeg_min_consecutive)
+        .sum()
+        .ge(cfg.depeg_min_consecutive)
+        .fillna(False)
+    )
+
     aligned = onchain.reindex(index, method="ffill")
 
     usdc = aligned["onchain_usdc_price"].astype(float)
@@ -148,20 +164,10 @@ def build_onchain_validation_frame(
     pos_usdt = usdt.gt(0)
     log_usdc.loc[pos_usdc] = np.log(usdc.loc[pos_usdc])
     log_usdt.loc[pos_usdt] = np.log(usdt.loc[pos_usdt])
-    valid_price = usdc.gt(0) & usdt.gt(0)
-    proxy = pd.Series(np.nan, index=index, dtype=float, name="onchain_proxy")
-    proxy.loc[valid_price] = np.log(usdt.loc[valid_price]) - np.log(usdc.loc[valid_price])
+    proxy = daily_proxy.reindex(index, method="ffill").rename("onchain_proxy")
 
     divergence = (stablecoin_proxy.astype(float) - proxy).rename("onchain_divergence")
-
-    excursion = proxy.abs().ge(cfg.depeg_delta_log)
-    onchain_depeg_flag = (
-        excursion.rolling(cfg.depeg_min_consecutive, min_periods=cfg.depeg_min_consecutive)
-        .sum()
-        .ge(cfg.depeg_min_consecutive)
-        .fillna(False)
-        .rename("onchain_depeg_flag")
-    )
+    onchain_depeg_flag = daily_depeg_flag.reindex(index, method="ffill").fillna(False).rename("onchain_depeg_flag")
 
     divergence_flag = divergence.abs().ge(cfg.divergence_alert_log).fillna(False).rename("onchain_divergence_flag")
 

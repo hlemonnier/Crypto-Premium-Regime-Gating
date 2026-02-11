@@ -65,6 +65,7 @@ src/
   strategy.py         # Trade/Widen/Risk-off decision logic
   backtest.py         # naive vs gated backtest + metrics
   ablation_report.py  # single-command ablation ladder report
+  execution_quality.py # slippage/resilience proxy diagnostics from bar+volume data
   plots.py            # Figure 1/2/3 exports
   pipeline.py         # end-to-end runner
   tune_gating.py      # parameter tuning for regime/strategy gating
@@ -90,7 +91,7 @@ python -m unittest discover -s tests -p 'test_*.py' -q
 
 Main pipeline input is a price matrix (parquet recommended, csv supported):
 
-- path: `data/processed/prices_matrix.parquet` (default, configurable)
+- path: `data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv` (default in `configs/config.yaml`, configurable)
 - index: `timestamp_utc` (UTC DatetimeIndex)
 - columns: symbols (e.g., `BTCUSDC-PERP`, `BTCUSDT-PERP`, `ETHUSDC-PERP`, ...)
 - values: price
@@ -122,6 +123,8 @@ python -m src.data_ingest \
 ```bash
 python -m src.pipeline --config configs/config.yaml
 ```
+
+The default config now points to a bundled matrix under `data/processed/episodes/yen_unwind_2024_binance/`, so this command is runnable out of the box.
 
 or override the matrix path:
 
@@ -204,24 +207,36 @@ Both commands write episode-specific outputs under `reports/episodes/<episode_na
 
 ## Gating parameter tuning (2024 episodes)
 
-Grid-search regime + strategy gating parameters and apply the best combo:
+Grid-search regime + strategy gating parameters with an explicit out-of-sample holdout:
 
 ```bash
 python -m src.tune_gating \
   --episodes "data/processed/episodes/*2024_binance/prices_matrix.csv" \
+  --holdout-count 1 \
   --apply
 ```
 
-Latest tuned defaults now set in `configs/config.yaml`:
+Default tuning split behavior:
 
-- `strategy.entry_k: 0.28`
-- `strategy.t_widen_quantile: 0.9`
+- when `--train-episodes/--test-episodes` are not provided, episodes are sorted chronologically and the last `--holdout-count` episodes are used as OOS.
+- output includes both `train_*` and `oos_*` metrics plus `selection_score`.
+- selection defaults to a blended score (`--oos-weight 0.5`).
+
+Current defaults in `configs/config.yaml` include:
+
+- `strategy.entry_k: 1.0`
+- `strategy.t_widen_quantile: 0.97`
 - `strategy.chi_widen_quantile: 0.99`
 - `strategy.threshold_mode: expanding` (causal quantiles)
-- `regimes.stress_quantile: 0.9`
-- `regimes.recovery_quantile: 0.8`
+- `strategy.hawkes_threshold_mode: expanding` (causal Hawkes gating when enabled)
+- `regimes.stress_quantile: 0.95`
+- `regimes.recovery_quantile: 0.6`
 - `regimes.threshold_mode: expanding` (causal quantiles)
 - `regimes.zscore_mode: expanding` (causal robust standardization)
+
+Reference OOS tuning table:
+
+- `reports/tables/gating_tuning_oos_latest.csv`
 
 If you need to reproduce legacy static-threshold behavior, switch both to:
 
@@ -251,11 +266,37 @@ If you need to reproduce legacy static-threshold behavior, switch both to:
 
 Configuration lives under `onchain:` in `configs/config.yaml`.
 
+Sampling/cadence note:
+
+- DefiLlama stablecoin prices are daily.
+- `onchain_depeg_flag` persistence is therefore computed on the native daily cadence before alignment to intraday bars.
+- current defaults are tuned for daily feed semantics (`onchain.depeg_delta_log: 0.005`, `onchain.depeg_min_consecutive: 1`).
+
 Proxy availability note:
 
 - when cross-asset USDC/USDT proxy legs are available (typical Binance perp episodes), debiased premium `p` is fully informative
 - when they are unavailable for an episode, pipeline is fail-closed by default (`premium.fail_on_missing_proxy: true`) and the episode is skipped in multi-episode reports
 - if you intentionally disable fail-closed behavior, use that run primarily for depeg safety/on-chain validation and state that debiased premium is not the main signal
+
+## Execution quality diagnostics (slippage proxy + resilience)
+
+Build execution diagnostics from `prices_resampled.csv` (price + volume bars):
+
+```bash
+python -m src.execution_quality --output-dir reports/final
+```
+
+Artifacts:
+
+- `reports/final/execution_slippage_proxy.csv`
+- `reports/final/execution_cross_quote_comparison.csv`
+- `reports/final/execution_resilience.csv`
+- `reports/final/execution_venue_comparison.csv`
+- `reports/final/execution_quality_report.md`
+
+Method limitation:
+
+- this is a bar-level proxy (impact/resilience) and does **not** replace order-book snapshot slippage/depth analytics.
 
 ## Ablation report (single script)
 
@@ -312,6 +353,11 @@ Main final artifacts:
 - `reports/final/figures/sharpe_naive_vs_gated.png`
 - `reports/final/figures/pnl_naive_vs_gated.png`
 - `reports/final/figures/fliprate_naive_vs_gated.png`
+- `reports/final/execution_slippage_proxy.csv`
+- `reports/final/execution_cross_quote_comparison.csv`
+- `reports/final/execution_resilience.csv`
+- `reports/final/execution_venue_comparison.csv`
+- `reports/final/execution_quality_report.md`
 
 ## Outputs
 
@@ -336,8 +382,8 @@ Priority order:
 1. `depeg_flag == True` => `Risk-off`
 2. `regime == stress` => `Risk-off`
 3. Hawkes enabled:
-   - `n(t) > 0.85` => `Risk-off`
-   - `n(t) > 0.70` => `Widen`
+   - fixed mode (`strategy.hawkes_threshold_mode: fixed`): `n(t) > 0.85` => `Risk-off`, `n(t) > 0.70` => `Widen`
+   - adaptive mode (`strategy.hawkes_threshold_mode: expanding|rolling`): causal quantile thresholds from `n(t)` history
 4. Else transient mode:
    - `Trade` only if `|m_t| > k * T_t * sigma_hat` (unit-consistent implementation)
    - `Widen` when high `T_t` or `chi_t`
@@ -351,12 +397,16 @@ Backtest execution policy (default):
 - PnL convention: `gross_pnl[t] = position[t-1] * (-(premium[t]-premium[t-1]))` on log-premium.
   This corresponds to mean-reversion on the premium spread (`short premium` profits when premium narrows).
 
-## Fixed episodes to evaluate
+## Episodes currently generated in this repository
 
-- LUNA/UST: 2022-05-09 to 2022-05-13
-- FTX: 2022-11-06 to 2022-11-11
-- USDC depeg: 2023-03-10 to 2023-03-11
-- Yen carry unwind: 2024-08-05 to 2024-08-06
+- `bybit_usdc_depeg_2023` (Bybit spot, 2023-03-10 to 2023-03-11)
+- `okx_usdc_depeg_2023` (OKX futures, 2023-03-10 to 2023-03-11)
+- `march_vol_2024_binance` (Binance futures, 2024-03-12 to 2024-03-13)
+- `yen_unwind_2024_binance` (Binance futures, 2024-08-05 to 2024-08-06)
+- `yen_followthrough_2024_binance` (Binance futures, 2024-08-07 to 2024-08-08)
+- `smoke_2024_08_05` (short smoke-run artifact)
+
+Reference episodes from the Notice spec (LUNA/UST, FTX) are part of the target checklist but are not included in the current generated artifact set.
 
 ## Notes
 

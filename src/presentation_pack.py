@@ -179,6 +179,16 @@ def main() -> None:
     calibration_details_path = output_dir / "calibration_details.csv"
     calibration_agg_path = output_dir / "calibration_aggregate.csv"
     calibration_exists = calibration_details_path.exists() and calibration_agg_path.exists()
+    execution_report_path = output_dir / "execution_quality_report.md"
+    execution_slippage_path = output_dir / "execution_slippage_proxy.csv"
+    execution_comparison_path = output_dir / "execution_cross_quote_comparison.csv"
+    execution_resilience_path = output_dir / "execution_resilience.csv"
+    execution_venue_path = output_dir / "execution_venue_comparison.csv"
+    execution_venue_df = (
+        pd.read_csv(execution_venue_path).sort_values("venue")
+        if execution_venue_path.exists()
+        else pd.DataFrame()
+    )
 
     md_path = output_dir / "executive_summary.md"
     with md_path.open("w", encoding="utf-8") as handle:
@@ -200,11 +210,38 @@ def main() -> None:
         )
 
         if "sharpe_gated" in wide_for_plot.columns and "sharpe_naive" in wide_for_plot.columns:
-            sharpe_delta_mean = float((wide_for_plot["sharpe_gated"] - wide_for_plot["sharpe_naive"]).mean())
-            handle.write(
-                f"\n- Mean Sharpe delta (gated - naive, full-series non-annualized): "
-                f"`{sharpe_delta_mean:.4f}`\n"
-            )
+            sharpe_delta = wide_for_plot["sharpe_gated"] - wide_for_plot["sharpe_naive"]
+            sharpe_valid = sharpe_delta.dropna()
+            if not sharpe_valid.empty:
+                sharpe_up = int((sharpe_valid > 0).sum())
+                sharpe_down = int((sharpe_valid < 0).sum())
+                sharpe_total = int(sharpe_valid.shape[0])
+                handle.write(
+                    f"\n- Mean Sharpe delta (gated - naive, full-series non-annualized): "
+                    f"`{float(sharpe_valid.mean()):.4f}`\n"
+                )
+                handle.write(
+                    f"- Median Sharpe delta (gated - naive, full-series non-annualized): "
+                    f"`{float(sharpe_valid.median()):.4f}`\n"
+                )
+                handle.write(f"- Episodes with Sharpe improvement: `{sharpe_up}/{sharpe_total}`\n")
+                handle.write(f"- Episodes with Sharpe degradation: `{sharpe_down}/{sharpe_total}`\n")
+
+        if "pnl_net_gated" in wide_for_plot.columns and "pnl_net_naive" in wide_for_plot.columns:
+            pnl_delta = wide_for_plot["pnl_net_gated"] - wide_for_plot["pnl_net_naive"]
+            pnl_valid = pnl_delta.dropna()
+            if not pnl_valid.empty:
+                pnl_up = int((pnl_valid > 0).sum())
+                pnl_down = int((pnl_valid < 0).sum())
+                pnl_total = int(pnl_valid.shape[0])
+                handle.write(
+                    f"- Mean PnL delta (gated - naive): `{float(pnl_valid.mean()):.6f}`\n"
+                )
+                handle.write(
+                    f"- Median PnL delta (gated - naive): `{float(pnl_valid.median()):.6f}`\n"
+                )
+                handle.write(f"- Episodes with PnL improvement: `{pnl_up}/{pnl_total}`\n")
+                handle.write(f"- Episodes with PnL degradation: `{pnl_down}/{pnl_total}`\n")
 
         if not onchain_df.empty:
             handle.write("\n## On-Chain Validation Snapshot\n\n")
@@ -222,6 +259,16 @@ def main() -> None:
                 "When coverage is missing, treat the episode primarily as depeg safety/on-chain validation.\n"
             )
 
+        if not execution_venue_df.empty:
+            handle.write("\n## Execution Quality Snapshot\n\n")
+            handle.write("```text\n")
+            handle.write(execution_venue_df.to_string(index=False))
+            handle.write("\n```\n")
+            handle.write(
+                "\nInterpretation: lower `mean_delta_usdc_minus_usdt_bps` indicates lower large-size impact "
+                "in USDC quotes versus USDT for the same root/venue.\n"
+            )
+
         handle.write("\n## Generated Artifacts\n\n")
         handle.write(f"- `{long_path}`\n")
         handle.write(f"- `{wide_path}`\n")
@@ -232,6 +279,16 @@ def main() -> None:
             handle.write(f"- `{onchain_path}`\n")
         if not proxy_df.empty:
             handle.write(f"- `{proxy_path}`\n")
+        if execution_report_path.exists():
+            handle.write(f"- `{execution_report_path}`\n")
+        if execution_slippage_path.exists():
+            handle.write(f"- `{execution_slippage_path}`\n")
+        if execution_comparison_path.exists():
+            handle.write(f"- `{execution_comparison_path}`\n")
+        if execution_resilience_path.exists():
+            handle.write(f"- `{execution_resilience_path}`\n")
+        if execution_venue_path.exists():
+            handle.write(f"- `{execution_venue_path}`\n")
 
         if calibration_exists:
             handle.write(f"- `{calibration_details_path}`\n")

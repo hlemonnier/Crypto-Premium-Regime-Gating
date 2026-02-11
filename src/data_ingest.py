@@ -128,7 +128,8 @@ def _remove_glitches(frame: pd.DataFrame, sigma_threshold: float) -> pd.DataFram
     if not np.isfinite(sigma) or sigma <= 1e-12:
         return local
 
-    keep = log_ret.abs().le(sigma_threshold * sigma) | log_ret.isna()
+    centered_abs = (log_ret - median).abs()
+    keep = centered_abs.le(sigma_threshold * sigma) | log_ret.isna()
     return local.loc[keep]
 
 

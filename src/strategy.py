@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import numpy as np
 import warnings
 
 import pandas as pd
@@ -16,6 +17,11 @@ class StrategyConfig:
     threshold_mode: str = "expanding"
     threshold_min_periods: int = 120
     threshold_window: int | None = None
+    hawkes_threshold_mode: str = "fixed"
+    hawkes_threshold_min_periods: int = 120
+    hawkes_threshold_window: int | None = None
+    hawkes_widen_quantile: float = 0.80
+    hawkes_risk_off_quantile: float = 0.95
     hawkes_widen_threshold: float = 0.70
     hawkes_risk_off_threshold: float = 0.85
 
@@ -83,8 +89,52 @@ def build_decisions(
     trade_signal = (m_t.abs().gt(entry_threshold)) & entry_threshold.notna()
 
     riskoff = depeg_flag.astype(bool)
+    hawkes_widen_threshold = pd.Series(np.nan, index=m_t.index, name="hawkes_widen_threshold", dtype="float64")
+    hawkes_riskoff_threshold = pd.Series(
+        np.nan, index=m_t.index, name="hawkes_riskoff_threshold", dtype="float64"
+    )
+    hawkes_widen_signal = pd.Series(False, index=m_t.index, name="hawkes_widen_signal")
+    hawkes_riskoff_signal = pd.Series(False, index=m_t.index, name="hawkes_riskoff_signal")
     if n_t is not None:
-        riskoff = riskoff | n_t.ge(cfg.hawkes_risk_off_threshold)
+        if cfg.hawkes_threshold_mode == "fixed":
+            hawkes_widen_threshold = pd.Series(
+                cfg.hawkes_widen_threshold,
+                index=m_t.index,
+                name="hawkes_widen_threshold",
+                dtype="float64",
+            )
+            hawkes_riskoff_threshold = pd.Series(
+                cfg.hawkes_risk_off_threshold,
+                index=m_t.index,
+                name="hawkes_riskoff_threshold",
+                dtype="float64",
+            )
+        else:
+            hawkes_widen_threshold = quantile_threshold(
+                n_t.astype(float),
+                cfg.hawkes_widen_quantile,
+                mode=cfg.hawkes_threshold_mode,
+                min_periods=cfg.hawkes_threshold_min_periods,
+                window=cfg.hawkes_threshold_window,
+                shift=1,
+                name="hawkes_widen_threshold",
+            )
+            hawkes_riskoff_threshold = quantile_threshold(
+                n_t.astype(float),
+                cfg.hawkes_risk_off_quantile,
+                mode=cfg.hawkes_threshold_mode,
+                min_periods=cfg.hawkes_threshold_min_periods,
+                window=cfg.hawkes_threshold_window,
+                shift=1,
+                name="hawkes_riskoff_threshold",
+            )
+            hawkes_riskoff_threshold = pd.concat(
+                [hawkes_riskoff_threshold, hawkes_widen_threshold], axis=1
+            ).max(axis=1).rename("hawkes_riskoff_threshold")
+
+        hawkes_widen_signal = n_t.ge(hawkes_widen_threshold).fillna(False).rename("hawkes_widen_signal")
+        hawkes_riskoff_signal = n_t.ge(hawkes_riskoff_threshold).fillna(False).rename("hawkes_riskoff_signal")
+        riskoff = riskoff | hawkes_riskoff_signal
     riskoff = riskoff | regime.eq("stress")
     decision.loc[riskoff] = "Risk-off"
 
@@ -98,7 +148,7 @@ def build_decisions(
     side.loc[trade & m_t.lt(0)] = "LongPremium"
 
     if n_t is not None:
-        hawkes_widen = (~riskoff) & n_t.ge(cfg.hawkes_widen_threshold)
+        hawkes_widen = (~riskoff) & hawkes_widen_signal
         decision.loc[hawkes_widen] = "Widen"
         side.loc[hawkes_widen] = "Flat"
 
@@ -114,6 +164,10 @@ def build_decisions(
         [
             entry_threshold,
             widen_frame,
+            hawkes_widen_threshold,
+            hawkes_riskoff_threshold,
+            hawkes_widen_signal,
+            hawkes_riskoff_signal,
             trade_signal.rename("trade_signal"),
             decision,
             side,

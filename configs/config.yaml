@@ -4,7 +4,7 @@ project:
 data:
   resample_rule: 1min
   ffill_limit: 2
-  price_matrix_path: data/processed/prices_matrix.parquet
+  price_matrix_path: data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv
 data_sources:
   binance: https://data.binance.vision/?prefix=data/
   gateio: https://www.gate.com/developer/historical_quotes
@@ -35,8 +35,8 @@ onchain:
   cache_path: data/processed/onchain/defillama_stablecoinprices.csv
   cache_max_age_hours: 24
   request_timeout_sec: 40
-  depeg_delta_log: 0.001
-  depeg_min_consecutive: 5
+  depeg_delta_log: 0.005
+  depeg_min_consecutive: 1
   divergence_alert_log: 0.001
 robust_filter:
   window: 1h
@@ -54,8 +54,8 @@ regimes:
   weight_entropy: 0.1
   smooth_span: 60
   cp_window: 30
-  stress_quantile: 0.9
-  recovery_quantile: 0.8
+  stress_quantile: 0.95
+  recovery_quantile: 0.6
   cp_quantile: 0.9
   threshold_mode: expanding
   threshold_min_periods: 120
@@ -75,11 +75,15 @@ hawkes:
   auto_adjust_min_events: true
   auto_min_events_floor: 5
 strategy:
-  entry_k: 0.28
-  t_widen_quantile: 0.9
+  entry_k: 1.0
+  t_widen_quantile: 0.97
   chi_widen_quantile: 0.99
   threshold_mode: expanding
   threshold_min_periods: 120
+  hawkes_threshold_mode: expanding
+  hawkes_threshold_min_periods: 120
+  hawkes_widen_quantile: 0.8
+  hawkes_risk_off_quantile: 0.95
   hawkes_widen_threshold: 0.7
   hawkes_risk_off_threshold: 0.85
 backtest:

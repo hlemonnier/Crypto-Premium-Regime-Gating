@@ -1,0 +1,4 @@
+venue,n_root_episode_pairs,usdc_preferred_count,usdt_preferred_count,mean_delta_usdc_minus_usdt_bps,median_recovery_bars_usdc,median_recovery_bars_usdt,mean_unrecovered_ratio_usdc,mean_unrecovered_ratio_usdt
+binance,12,11,1,-1.1477456886993214,3.0,3.5,0.0,0.0028735632183908046
+bybit,3,1,2,0.7707692573832367,2.0,2.5,0.0,0.0
+okx,2,2,0,-4.030720826391918,1.0,4.0,0.0,0.0
