@@ -26,6 +26,13 @@ DEFAULT_SYMBOLS = [
     "BNBUSDT",
 ]
 
+FUTURES_PRICE_SOURCE_TO_DATASET = {
+    "mark": "markPriceKlines",
+    "last": "klines",
+    "index": "indexPriceKlines",
+    "premium": "premiumIndexKlines",
+}
+
 BINANCE_KLINE_COLUMNS = [
     "open_time",
     "open",
@@ -48,16 +55,18 @@ def build_binance_daily_kline_url(
     day: date,
     *,
     market: str,
+    dataset_kind: str | None = None,
 ) -> str:
     day_str = day.strftime("%Y-%m-%d")
     if market == "futures":
-        market_path = "futures/um"
+        dataset = str(dataset_kind or "markPriceKlines")
+        market_path = f"futures/um/daily/{dataset}"
     elif market == "spot":
-        market_path = "spot"
+        market_path = "spot/daily/klines"
     else:
         raise ValueError("market must be 'futures' or 'spot'")
     return (
-        f"https://data.binance.vision/data/{market_path}/daily/klines/"
+        f"https://data.binance.vision/data/{market_path}/"
         f"{symbol}/{interval}/{symbol}-{interval}-{day_str}.zip"
     )
 
@@ -73,7 +82,7 @@ def download_to_path(url: str, destination: Path, *, timeout: int = 60) -> Path:
     return destination
 
 
-def load_binance_zip(path: Path, symbol: str) -> pd.DataFrame:
+def load_binance_zip(path: Path, symbol: str, *, market: str) -> pd.DataFrame:
     with ZipFile(path) as archive:
         names = [name for name in archive.namelist() if not name.endswith("/")]
         if not names:
@@ -91,11 +100,12 @@ def load_binance_zip(path: Path, symbol: str) -> pd.DataFrame:
     df.columns = BINANCE_KLINE_COLUMNS
 
     open_time = pd.to_numeric(df["open_time"], errors="coerce")
+    suffix = "PERP" if market == "futures" else "SPOT"
     out = pd.DataFrame()
     out["timestamp_utc"] = pd.to_datetime(open_time, unit="ms", utc=True, errors="coerce")
     out["price"] = pd.to_numeric(df["close"], errors="coerce")
     out["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-    out["symbol"] = f"{symbol}-PERP"
+    out["symbol"] = f"{symbol}-{suffix}"
     out["venue"] = "binance"
     out = out.dropna(subset=["timestamp_utc", "price"])
     return out
@@ -123,21 +133,33 @@ def collect_binance_klines(
     end: date,
     interval: str,
     market: str,
+    futures_price_source: str,
     raw_dir: Path,
     skip_existing: bool,
 ) -> pd.DataFrame:
     tables: list[pd.DataFrame] = []
     failures: list[str] = []
+    if market == "futures":
+        dataset_kind = FUTURES_PRICE_SOURCE_TO_DATASET[futures_price_source]
+    else:
+        dataset_kind = "klines"
+
     for symbol in symbols:
         for day in daterange(start, end):
-            url = build_binance_daily_kline_url(symbol, interval, day, market=market)
+            url = build_binance_daily_kline_url(
+                symbol,
+                interval,
+                day,
+                market=market,
+                dataset_kind=dataset_kind,
+            )
             filename = Path(url).name
-            target_path = raw_dir / market / symbol / interval / filename
+            target_path = raw_dir / market / dataset_kind / symbol / interval / filename
 
             try:
                 if not (skip_existing and target_path.exists()):
                     download_to_path(url, target_path)
-                tables.append(load_binance_zip(target_path, symbol))
+                tables.append(load_binance_zip(target_path, symbol, market=market))
             except Exception:
                 failures.append(url)
 
@@ -175,6 +197,12 @@ def parse_args() -> argparse.Namespace:
         default="futures",
         help="Binance dataset family",
     )
+    parser.add_argument(
+        "--futures-price-source",
+        choices=["mark", "last", "index", "premium"],
+        default="mark",
+        help="Futures price source: mark (recommended), trade close (last), index, or premium index.",
+    )
     parser.add_argument("--interval", default="1m", help="Binance kline interval")
     parser.add_argument("--raw-dir", default="data/raw/binance/klines", help="Raw zip destination")
     parser.add_argument("--processed-root", default="data/processed/episodes", help="Processed episode root")
@@ -200,12 +228,18 @@ def main() -> None:
     reports_root = Path(args.reports_root) / episode
 
     print(f"Collecting Binance data for {episode}...")
+    if args.market == "spot" and args.futures_price_source != "last":
+        print(
+            "Warning: --futures-price-source applies only to futures. "
+            "Spot always uses kline close."
+        )
     raw_table = collect_binance_klines(
         symbols=args.symbols,
         start=start,
         end=end,
         interval=args.interval,
         market=args.market,
+        futures_price_source=args.futures_price_source,
         raw_dir=raw_dir,
         skip_existing=args.skip_existing,
     )
@@ -220,6 +254,8 @@ def main() -> None:
     matrix_path = find_matrix_path(processed_dir)
 
     print("Ingestion completed.")
+    if args.market == "futures":
+        print(f"- futures price source: {args.futures_price_source}")
     print(f"- raw rows: {raw_table.shape[0]}")
     print(f"- resampled rows: {resampled.shape[0]}")
     print(f"- matrix shape: {matrix.shape}")

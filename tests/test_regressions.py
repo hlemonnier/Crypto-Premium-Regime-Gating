@@ -10,7 +10,7 @@ import pandas as pd
 from src.backtest import periods_per_year_from_freq, run_backtest
 from src.bybit_data import bybit_interval_to_ms
 from src.data_ingest import _remove_glitches, sanitize_single_bar_spikes
-from src.execution_quality import build_cross_quote_comparison, build_venue_summary
+from src.execution_quality import build_cross_quote_comparison, build_l2_coverage, build_venue_summary
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.pipeline import load_price_matrix
 from src.premium import PremiumConfig, build_premium_frame
@@ -282,6 +282,8 @@ class OnchainColumnsTests(unittest.TestCase):
         self.assertIn("onchain_usdt_minus_1", frame.columns)
         self.assertIn("onchain_log_usdc_dev", frame.columns)
         self.assertIn("onchain_log_usdt_dev", frame.columns)
+        self.assertIn("onchain_source_timestamp_utc", frame.columns)
+        self.assertIn("onchain_source_age_hours", frame.columns)
 
 
 class BybitIntervalTests(unittest.TestCase):
@@ -317,6 +319,37 @@ class OnchainCadenceTests(unittest.TestCase):
 
             frame = build_onchain_validation_frame(index=idx, stablecoin_proxy=stablecoin_proxy, cfg=cfg)
             self.assertEqual(int(frame["onchain_depeg_flag"].sum()), 0)
+
+    def test_onchain_intraday_values_are_lagged_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "onchain.csv"
+            daily = pd.DataFrame(
+                {
+                    "timestamp_utc": [
+                        "2024-03-12T00:00:00Z",
+                        "2024-03-13T00:00:00Z",
+                    ],
+                    "onchain_usdc_price": [1.0, 0.9],
+                    "onchain_usdt_price": [1.0, 1.0],
+                }
+            )
+            daily.to_csv(cache_path, index=False)
+
+            idx = pd.date_range("2024-03-12", periods=2 * 24 * 60, freq="1min", tz="UTC")
+            stablecoin_proxy = pd.Series(0.0, index=idx, name="stablecoin_proxy")
+            cfg = OnchainConfig(
+                cache_path=str(cache_path),
+                cache_max_age_hours=24 * 365,
+                intraday_lag_days=1,
+                depeg_delta_log=0.001,
+                depeg_min_consecutive=1,
+            )
+            frame = build_onchain_validation_frame(index=idx, stablecoin_proxy=stablecoin_proxy, cfg=cfg)
+
+            ts = pd.Timestamp("2024-03-13T12:00:00Z")
+            self.assertAlmostEqual(float(frame.loc[ts, "onchain_usdc_price"]), 1.0, places=12)
+            self.assertEqual(str(frame.loc[ts, "onchain_source_timestamp_utc"]), "2024-03-12 00:00:00+00:00")
+            self.assertGreater(float(frame.loc[ts, "onchain_source_age_hours"]), 24.0)
 
 
 class GlitchFilterTests(unittest.TestCase):
@@ -454,6 +487,12 @@ class ExecutionProxyTests(unittest.TestCase):
         self.assertIn("mean_delta_large_excess_bps", out.columns)
         self.assertIn("n_indeterminate_norm", out.columns)
         self.assertNotIn("usdc_preferred_count", out.columns)
+
+    def test_l2_coverage_reports_missing_when_no_files_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            coverage = build_l2_coverage(["ep_a", "ep_b"], Path(tmp_dir))
+            self.assertEqual(coverage.shape[0], 2)
+            self.assertFalse(bool(coverage["l2_ready"].astype(bool).any()))
 
 
 if __name__ == "__main__":

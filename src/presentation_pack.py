@@ -116,7 +116,7 @@ def _read_pnl_localization(
             best_window_end = frame.iloc[best_idx]["timestamp_utc"]
 
     localized_positive = bool(
-        net > 1e-4
+        net > 1e-3
         and np.isfinite(best_window_share_of_net)
         and best_window_share_of_net >= 0.5
     )
@@ -258,11 +258,38 @@ def main() -> None:
     execution_comparison_path = output_dir / "execution_cross_quote_comparison.csv"
     execution_resilience_path = output_dir / "execution_resilience.csv"
     execution_venue_path = output_dir / "execution_venue_comparison.csv"
+    execution_l2_coverage_path = output_dir / "execution_l2_coverage.csv"
     execution_venue_df = (
         pd.read_csv(execution_venue_path).sort_values(["venue", "market_type"])
         if execution_venue_path.exists()
         else pd.DataFrame()
     )
+    execution_l2_coverage_df = (
+        pd.read_csv(execution_l2_coverage_path).sort_values("episode")
+        if execution_l2_coverage_path.exists()
+        else pd.DataFrame()
+    )
+    localized_naive_episodes: set[str] = set()
+    if not localization_df.empty:
+        localized_naive_episodes = set(
+            localization_df.loc[
+                (localization_df["variant"] == "naive")
+                & localization_df["localized_positive_pnl_flag"].astype(bool),
+                "episode",
+            ].astype(str).tolist()
+        )
+    robust_filter_df = pd.DataFrame(
+        {
+            "episode": list(wide_for_plot.index.astype(str)),
+            "exclude_from_robust_aggregate": [ep in localized_naive_episodes for ep in wide_for_plot.index.astype(str)],
+            "exclude_reason": [
+                "localized_naive_positive_pnl" if ep in localized_naive_episodes else ""
+                for ep in wide_for_plot.index.astype(str)
+            ],
+        }
+    )
+    robust_filter_path = output_dir / "final_robust_filter.csv"
+    robust_filter_df.to_csv(robust_filter_path, index=False)
 
     md_path = output_dir / "executive_summary.md"
     with md_path.open("w", encoding="utf-8") as handle:
@@ -291,19 +318,39 @@ def main() -> None:
                 sharpe_down = int((sharpe_valid < 0).sum())
                 sharpe_total = int(sharpe_valid.shape[0])
                 handle.write(
-                    f"\n- Mean Sharpe delta (gated - naive, full-series non-annualized): "
+                    f"\n- Raw mean Sharpe delta (gated - naive, full-series non-annualized): "
                     f"`{float(sharpe_valid.mean()):.4f}`\n"
                 )
                 handle.write(
-                    f"- Median Sharpe delta (gated - naive, full-series non-annualized): "
+                    f"- Raw median Sharpe delta (gated - naive, full-series non-annualized): "
                     f"`{float(sharpe_valid.median()):.4f}`\n"
                 )
-                handle.write(f"- Episodes with Sharpe improvement: `{sharpe_up}/{sharpe_total}`\n")
-                handle.write(f"- Episodes with Sharpe degradation: `{sharpe_down}/{sharpe_total}`\n")
-                if float(sharpe_valid.mean()) > 0:
-                    handle.write("- Conclusion (Sharpe): gated improvement is positive on average.\n")
+                handle.write(f"- Raw episodes with Sharpe improvement: `{sharpe_up}/{sharpe_total}`\n")
+                handle.write(f"- Raw episodes with Sharpe degradation: `{sharpe_down}/{sharpe_total}`\n")
+
+                sharpe_eval = sharpe_valid
+                if localized_naive_episodes:
+                    sharpe_eval = sharpe_valid.loc[~sharpe_valid.index.isin(localized_naive_episodes)]
+                    excluded = sorted(set(sharpe_valid.index) - set(sharpe_eval.index))
+                    if excluded:
+                        handle.write(
+                            f"- Robust Sharpe aggregate excludes localized naive episodes: `{excluded}`\n"
+                        )
+                        handle.write(
+                            f"- Robust mean Sharpe delta (gated - naive): "
+                            f"`{float(sharpe_eval.mean()):.4f}`\n"
+                        )
+                        handle.write(
+                            f"- Robust median Sharpe delta (gated - naive): "
+                            f"`{float(sharpe_eval.median()):.4f}`\n"
+                        )
+
+                if float(sharpe_eval.mean()) > 0:
+                    handle.write("- Conclusion (Sharpe): gated improvement is positive on robust aggregate.\n")
                 else:
-                    handle.write("- Conclusion (Sharpe): gated improvement is **not** demonstrated on average.\n")
+                    handle.write(
+                        "- Conclusion (Sharpe): gated improvement is **not** demonstrated on robust aggregate.\n"
+                    )
 
         if "pnl_net_gated" in wide_for_plot.columns and "pnl_net_naive" in wide_for_plot.columns:
             pnl_delta = wide_for_plot["pnl_net_gated"] - wide_for_plot["pnl_net_naive"]
@@ -313,17 +360,37 @@ def main() -> None:
                 pnl_down = int((pnl_valid < 0).sum())
                 pnl_total = int(pnl_valid.shape[0])
                 handle.write(
-                    f"- Mean PnL delta (gated - naive): `{float(pnl_valid.mean()):.6f}`\n"
+                    f"- Raw mean PnL delta (gated - naive): `{float(pnl_valid.mean()):.6f}`\n"
                 )
                 handle.write(
-                    f"- Median PnL delta (gated - naive): `{float(pnl_valid.median()):.6f}`\n"
+                    f"- Raw median PnL delta (gated - naive): `{float(pnl_valid.median()):.6f}`\n"
                 )
-                handle.write(f"- Episodes with PnL improvement: `{pnl_up}/{pnl_total}`\n")
-                handle.write(f"- Episodes with PnL degradation: `{pnl_down}/{pnl_total}`\n")
-                if float(pnl_valid.mean()) > 0:
-                    handle.write("- Conclusion (PnL): gated improvement is positive on average.\n")
+                handle.write(f"- Raw episodes with PnL improvement: `{pnl_up}/{pnl_total}`\n")
+                handle.write(f"- Raw episodes with PnL degradation: `{pnl_down}/{pnl_total}`\n")
+
+                pnl_eval = pnl_valid
+                if localized_naive_episodes:
+                    pnl_eval = pnl_valid.loc[~pnl_valid.index.isin(localized_naive_episodes)]
+                    excluded = sorted(set(pnl_valid.index) - set(pnl_eval.index))
+                    if excluded:
+                        handle.write(
+                            f"- Robust PnL aggregate excludes localized naive episodes: `{excluded}`\n"
+                        )
+                        handle.write(
+                            f"- Robust mean PnL delta (gated - naive): "
+                            f"`{float(pnl_eval.mean()):.6f}`\n"
+                        )
+                        handle.write(
+                            f"- Robust median PnL delta (gated - naive): "
+                            f"`{float(pnl_eval.median()):.6f}`\n"
+                        )
+
+                if float(pnl_eval.mean()) > 0:
+                    handle.write("- Conclusion (PnL): gated improvement is positive on robust aggregate.\n")
                 else:
-                    handle.write("- Conclusion (PnL): gated improvement is **not** demonstrated on average.\n")
+                    handle.write(
+                        "- Conclusion (PnL): gated improvement is **not** demonstrated on robust aggregate.\n"
+                    )
 
         if not onchain_df.empty:
             handle.write("\n## On-Chain Validation Snapshot\n\n")
@@ -375,6 +442,19 @@ def main() -> None:
                 "Interpretation: when `localized_positive_pnl_flag` is true, performance is structurally fragile "
                 "and should not be treated as robust signal quality.\n"
             )
+            handle.write(f"Robust aggregate exclusion map is exported to: `{robust_filter_path}`.\n")
+
+        if not execution_l2_coverage_df.empty:
+            handle.write("\n## Execution Data Readiness (L2)\n\n")
+            handle.write("```text\n")
+            handle.write(execution_l2_coverage_df.to_string(index=False))
+            handle.write("\n```\n")
+            ready = execution_l2_coverage_df["l2_ready"].astype(bool)
+            if not bool(ready.all()):
+                handle.write(
+                    "Execution-quality conclusions are withheld for episodes without complete "
+                    "L2 orderbook + tick-trade coverage.\n"
+                )
 
         if not execution_venue_df.empty:
             handle.write("\n## Execution Proxy Snapshot (Bar-Level)\n\n")
@@ -397,6 +477,12 @@ def main() -> None:
                 "Decision guardrail: do not conclude 'better liquidity' without L2 order-book replay "
                 "(book-walk), and normalization of tick/lot/fees/funding/contract specs.\n"
             )
+        elif not execution_l2_coverage_df.empty:
+            handle.write(
+                "\n## Execution Proxy Snapshot (Bar-Level)\n\n"
+                "No proxy table is reported because fail-closed mode blocked execution diagnostics "
+                "without full L2 readiness.\n"
+            )
 
         handle.write("\n## Generated Artifacts\n\n")
         handle.write(f"- `{long_path}`\n")
@@ -412,6 +498,9 @@ def main() -> None:
             handle.write(f"- `{localization_path}`\n")
         if execution_report_path.exists():
             handle.write(f"- `{execution_report_path}`\n")
+        handle.write(f"- `{robust_filter_path}`\n")
+        if execution_l2_coverage_path.exists():
+            handle.write(f"- `{execution_l2_coverage_path}`\n")
         if execution_slippage_path.exists():
             handle.write(f"- `{execution_slippage_path}`\n")
         if execution_comparison_path.exists():

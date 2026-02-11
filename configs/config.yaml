@@ -39,6 +39,7 @@ onchain:
   cache_path: data/processed/onchain/defillama_stablecoinprices.csv
   cache_max_age_hours: 24
   request_timeout_sec: 40
+  intraday_lag_days: 1
   depeg_delta_log: 0.005
   depeg_min_consecutive: 1
   divergence_alert_log: 0.001

@@ -17,6 +17,148 @@ DEFAULT_EPISODES = [
     "yen_followthrough_2024_binance",
 ]
 
+SLIPPAGE_COLUMNS = [
+    "episode",
+    "venue",
+    "market_type",
+    "root",
+    "quote",
+    "symbol",
+    "n_obs",
+    "median_volume",
+    "median_rel_size",
+    "q90_rel_size",
+    "baseline_vol_median_bps",
+    "impact_all_mean_bps",
+    "impact_all_median_bps",
+    "impact_large_mean_bps",
+    "impact_large_median_bps",
+    "impact_all_mean_excess_bps",
+    "impact_all_median_excess_bps",
+    "impact_large_mean_excess_bps",
+    "impact_large_median_excess_bps",
+    "impact_all_mean_norm",
+    "impact_all_median_norm",
+    "impact_large_mean_norm",
+    "impact_large_median_norm",
+    "large_count",
+]
+
+COMPARISON_COLUMNS = [
+    "episode",
+    "venue",
+    "market_type",
+    "root",
+    "impact_large_mean_bps_usdc",
+    "impact_large_mean_bps_usdt",
+    "impact_large_delta_usdc_minus_usdt_bps",
+    "impact_large_mean_excess_bps_usdc",
+    "impact_large_mean_excess_bps_usdt",
+    "impact_large_delta_excess_usdc_minus_usdt_bps",
+    "impact_large_mean_norm_usdc",
+    "impact_large_mean_norm_usdt",
+    "impact_large_delta_norm_usdc_minus_usdt",
+    "impact_all_mean_bps_usdc",
+    "impact_all_mean_bps_usdt",
+    "preferred_quote_on_large_norm",
+]
+
+RESILIENCE_COLUMNS = [
+    "episode",
+    "venue",
+    "market_type",
+    "root",
+    "quote",
+    "symbol",
+    "shock_threshold_bps",
+    "baseline_abs_ret_bps",
+    "n_shocks",
+    "n_recovered",
+    "unrecovered_ratio",
+    "recovery_median_bars",
+    "recovery_p90_bars",
+]
+
+VENUE_COLUMNS = [
+    "venue",
+    "market_type",
+    "n_root_episode_pairs",
+    "mean_delta_large_raw_bps",
+    "median_delta_large_raw_bps",
+    "mean_delta_large_excess_bps",
+    "median_delta_large_excess_bps",
+    "mean_delta_large_norm",
+    "median_delta_large_norm",
+    "n_indeterminate_norm",
+    "median_recovery_bars_usdc",
+    "median_recovery_bars_usdt",
+    "mean_unrecovered_ratio_usdc",
+    "mean_unrecovered_ratio_usdt",
+]
+
+L2_COVERAGE_COLUMNS = [
+    "episode",
+    "l2_orderbook_available",
+    "tick_trades_available",
+    "l2_ready",
+    "l2_root",
+]
+
+
+def _empty_table(columns: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(columns=columns)
+
+
+def _has_any_path(root: Path, patterns: list[str]) -> bool:
+    for pattern in patterns:
+        if any(root.glob(pattern)):
+            return True
+    return False
+
+
+def build_l2_coverage(episodes: list[str], l2_root: Path) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for episode in episodes:
+        episode_root = l2_root / episode
+        has_book = _has_any_path(
+            episode_root,
+            [
+                "*orderbook*level*2*.parquet",
+                "*orderbook*level*2*.csv",
+                "*orderbook*l2*.parquet",
+                "*orderbook*l2*.csv",
+                "*book*l2*.parquet",
+                "*book*l2*.csv",
+                "orderbook*.parquet",
+                "orderbook*.csv",
+                "depth*.parquet",
+                "depth*.csv",
+            ],
+        )
+        has_ticks = _has_any_path(
+            episode_root,
+            [
+                "*trade*tick*.parquet",
+                "*trade*tick*.csv",
+                "*trades*.parquet",
+                "*trades*.csv",
+                "*aggTrade*.parquet",
+                "*aggTrade*.csv",
+            ],
+        )
+        rows.append(
+            {
+                "episode": episode,
+                "l2_orderbook_available": bool(has_book),
+                "tick_trades_available": bool(has_ticks),
+                "l2_ready": bool(has_book and has_ticks),
+                "l2_root": str(episode_root),
+            }
+        )
+    if not rows:
+        return _empty_table(L2_COVERAGE_COLUMNS)
+    return pd.DataFrame(rows, columns=L2_COVERAGE_COLUMNS)
+
 
 def _normalize_symbol(symbol: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", symbol.upper())
@@ -193,14 +335,14 @@ def build_slippage_proxy(enriched: pd.DataFrame) -> pd.DataFrame:
         )
 
     if not rows:
-        return pd.DataFrame()
+        return _empty_table(SLIPPAGE_COLUMNS)
     out = pd.DataFrame(rows)
     return out.sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(drop=True)
 
 
 def build_cross_quote_comparison(slippage: pd.DataFrame, *, norm_delta_tolerance: float = 0.05) -> pd.DataFrame:
     if slippage.empty:
-        return pd.DataFrame()
+        return _empty_table(COMPARISON_COLUMNS)
 
     rows: list[dict[str, Any]] = []
     for (episode, venue, market_type, root), group in slippage.groupby(
@@ -239,7 +381,7 @@ def build_cross_quote_comparison(slippage: pd.DataFrame, *, norm_delta_tolerance
         )
 
     if not rows:
-        return pd.DataFrame()
+        return _empty_table(COMPARISON_COLUMNS)
     return pd.DataFrame(rows).sort_values(["episode", "venue", "market_type", "root"]).reset_index(drop=True)
 
 
@@ -297,7 +439,7 @@ def build_resilience_table(
         )
 
     if not rows:
-        return pd.DataFrame()
+        return _empty_table(RESILIENCE_COLUMNS)
     return pd.DataFrame(rows).sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(
         drop=True
     )
@@ -305,7 +447,7 @@ def build_resilience_table(
 
 def build_venue_summary(comparison: pd.DataFrame, resilience: pd.DataFrame) -> pd.DataFrame:
     if comparison.empty:
-        return pd.DataFrame()
+        return _empty_table(VENUE_COLUMNS)
 
     cmp_agg = (
         comparison.groupby(["venue", "market_type"], as_index=False)
@@ -352,7 +494,20 @@ def parse_args() -> argparse.Namespace:
         help="Episode ids to include.",
     )
     parser.add_argument("--processed-root", default="data/processed/episodes", help="Processed episodes root.")
+    parser.add_argument(
+        "--l2-root",
+        default="data/processed/orderbook",
+        help="Root folder containing per-episode L2 orderbook and tick-trade files.",
+    )
     parser.add_argument("--output-dir", default="reports/final", help="Output folder for execution diagnostics.")
+    parser.add_argument(
+        "--allow-bar-proxy-without-l2",
+        action="store_true",
+        help=(
+            "Allow bar-level proxy diagnostics even when L2/tick data are missing. "
+            "Default is fail-closed (no execution ranking) without L2 readiness."
+        ),
+    )
     parser.add_argument("--size-window", type=int, default=60, help="Rolling window for relative size proxy.")
     parser.add_argument("--min-size-periods", type=int, default=20, help="Min periods for rolling size baseline.")
     parser.add_argument(
@@ -375,8 +530,54 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     processed_root = Path(args.processed_root)
+    l2_root = Path(args.l2_root)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    slippage_path = out_dir / "execution_slippage_proxy.csv"
+    comparison_path = out_dir / "execution_cross_quote_comparison.csv"
+    resilience_path = out_dir / "execution_resilience.csv"
+    venue_path = out_dir / "execution_venue_comparison.csv"
+    coverage_path = out_dir / "execution_l2_coverage.csv"
+    report_path = out_dir / "execution_quality_report.md"
+
+    l2_coverage = build_l2_coverage(list(args.episodes), l2_root)
+    l2_coverage.to_csv(coverage_path, index=False)
+    missing_l2 = l2_coverage[~l2_coverage["l2_ready"].astype(bool)].copy()
+
+    if (not args.allow_bar_proxy_without_l2) and (not missing_l2.empty):
+        _empty_table(SLIPPAGE_COLUMNS).to_csv(slippage_path, index=False)
+        _empty_table(COMPARISON_COLUMNS).to_csv(comparison_path, index=False)
+        _empty_table(RESILIENCE_COLUMNS).to_csv(resilience_path, index=False)
+        _empty_table(VENUE_COLUMNS).to_csv(venue_path, index=False)
+
+        with report_path.open("w", encoding="utf-8") as handle:
+            handle.write("# Execution Diagnostics Blocked (L2 Missing)\n\n")
+            handle.write(
+                "Execution-quality conclusions are disabled because required L2 orderbook + tick-trade "
+                "coverage is incomplete for selected episodes.\n\n"
+            )
+            handle.write("## L2 Coverage\n\n")
+            handle.write("```text\n")
+            handle.write(l2_coverage.to_string(index=False))
+            handle.write("\n```\n")
+            handle.write(
+                "\nNo bar-proxy fallback was produced because `--allow-bar-proxy-without-l2` was not set.\n"
+            )
+            handle.write(
+                "This fail-closed behavior prevents unsupported venue/quote liquidity rankings.\n"
+            )
+            handle.write("\n## Artifacts\n\n")
+            handle.write(f"- `{coverage_path}`\n")
+            handle.write(f"- `{slippage_path}`\n")
+            handle.write(f"- `{comparison_path}`\n")
+            handle.write(f"- `{resilience_path}`\n")
+            handle.write(f"- `{venue_path}`\n")
+
+        print("Execution diagnostics blocked: missing L2/tick inputs for at least one episode.")
+        print(f"- l2_coverage: {coverage_path}")
+        print(f"- report: {report_path}")
+        return
 
     frames: list[pd.DataFrame] = []
     missing: list[str] = []
@@ -409,12 +610,6 @@ def main() -> None:
     )
     venue_summary = build_venue_summary(comparison, resilience)
 
-    slippage_path = out_dir / "execution_slippage_proxy.csv"
-    comparison_path = out_dir / "execution_cross_quote_comparison.csv"
-    resilience_path = out_dir / "execution_resilience.csv"
-    venue_path = out_dir / "execution_venue_comparison.csv"
-    report_path = out_dir / "execution_quality_report.md"
-
     slippage.to_csv(slippage_path, index=False)
     comparison.to_csv(comparison_path, index=False)
     resilience.to_csv(resilience_path, index=False)
@@ -430,6 +625,14 @@ def main() -> None:
             handle.write("\nMissing episodes (skipped):\n")
             for ep in missing:
                 handle.write(f"- `{ep}`\n")
+
+        handle.write("\n## L2 Coverage\n\n")
+        handle.write("```text\n")
+        handle.write(l2_coverage.to_string(index=False))
+        handle.write("\n```\n")
+        handle.write(
+            "\nNote: L2 coverage is provided for transparency. Current diagnostics below remain bar-level proxies.\n"
+        )
 
         handle.write("\n## Method Notes\n\n")
         handle.write("- Data source: `prices_resampled.csv` (price + volume bars).\n")
@@ -481,12 +684,14 @@ def main() -> None:
             handle.write("\n```\n")
 
         handle.write("\n## Artifacts\n\n")
+        handle.write(f"- `{coverage_path}`\n")
         handle.write(f"- `{slippage_path}`\n")
         handle.write(f"- `{comparison_path}`\n")
         handle.write(f"- `{resilience_path}`\n")
         handle.write(f"- `{venue_path}`\n")
 
     print("Execution quality diagnostics completed.")
+    print(f"- l2_coverage: {coverage_path}")
     print(f"- slippage_proxy: {slippage_path}")
     print(f"- cross_quote: {comparison_path}")
     print(f"- resilience: {resilience_path}")

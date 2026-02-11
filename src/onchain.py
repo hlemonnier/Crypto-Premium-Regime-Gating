@@ -20,6 +20,7 @@ class OnchainConfig:
     cache_path: str = "data/processed/onchain/defillama_stablecoinprices.csv"
     cache_max_age_hours: int = 24
     request_timeout_sec: int = 40
+    intraday_lag_days: int = 1
     depeg_delta_log: float = 0.001
     depeg_min_consecutive: int = 5
     divergence_alert_log: float = 0.001
@@ -28,6 +29,8 @@ class OnchainConfig:
 ONCHAIN_COLUMNS = [
     "onchain_usdc_price",
     "onchain_usdt_price",
+    "onchain_source_timestamp_utc",
+    "onchain_source_age_hours",
     "onchain_usdc_minus_1",
     "onchain_usdt_minus_1",
     "onchain_log_usdc_dev",
@@ -44,6 +47,8 @@ def empty_onchain_frame(index: pd.Index) -> pd.DataFrame:
     frame = pd.DataFrame(index=index)
     frame["onchain_usdc_price"] = np.nan
     frame["onchain_usdt_price"] = np.nan
+    frame["onchain_source_timestamp_utc"] = pd.NaT
+    frame["onchain_source_age_hours"] = np.nan
     frame["onchain_usdc_minus_1"] = np.nan
     frame["onchain_usdt_minus_1"] = np.nan
     frame["onchain_log_usdc_dev"] = np.nan
@@ -152,7 +157,25 @@ def build_onchain_validation_frame(
         .fillna(False)
     )
 
-    aligned = onchain.reindex(index, method="ffill")
+    lag_days = max(0, int(cfg.intraday_lag_days))
+    effective_onchain = onchain.shift(lag_days)
+    effective_proxy = daily_proxy.shift(lag_days)
+    effective_depeg_flag = daily_depeg_flag.astype(float).shift(lag_days).fillna(0.0).astype(bool)
+    effective_source_ts = pd.Series(onchain.index, index=onchain.index).shift(lag_days)
+
+    aligned = effective_onchain.reindex(index, method="ffill")
+    source_ts = (
+        effective_source_ts
+        .reindex(index, method="ffill")
+        .rename("onchain_source_timestamp_utc")
+    )
+    age_hours = (
+        (pd.Series(index, index=index) - source_ts)
+        .dt.total_seconds()
+        .div(3600.0)
+        .rename("onchain_source_age_hours")
+    )
+    age_hours = age_hours.where(age_hours >= 0.0)
 
     usdc = aligned["onchain_usdc_price"].astype(float)
     usdt = aligned["onchain_usdt_price"].astype(float)
@@ -164,10 +187,12 @@ def build_onchain_validation_frame(
     pos_usdt = usdt.gt(0)
     log_usdc.loc[pos_usdc] = np.log(usdc.loc[pos_usdc])
     log_usdt.loc[pos_usdt] = np.log(usdt.loc[pos_usdt])
-    proxy = daily_proxy.reindex(index, method="ffill").rename("onchain_proxy")
+    proxy = effective_proxy.reindex(index, method="ffill").rename("onchain_proxy")
 
     divergence = (stablecoin_proxy.astype(float) - proxy).rename("onchain_divergence")
-    onchain_depeg_flag = daily_depeg_flag.reindex(index, method="ffill").fillna(False).rename("onchain_depeg_flag")
+    onchain_depeg_flag = (
+        effective_depeg_flag.reindex(index, method="ffill").fillna(False).rename("onchain_depeg_flag")
+    )
 
     divergence_flag = divergence.abs().ge(cfg.divergence_alert_log).fillna(False).rename("onchain_divergence_flag")
 
@@ -175,6 +200,8 @@ def build_onchain_validation_frame(
         {
             "onchain_usdc_price": usdc,
             "onchain_usdt_price": usdt,
+            "onchain_source_timestamp_utc": source_ts,
+            "onchain_source_age_hours": age_hours,
             "onchain_usdc_minus_1": usdc_minus_1,
             "onchain_usdt_minus_1": usdt_minus_1,
             "onchain_log_usdc_dev": log_usdc,

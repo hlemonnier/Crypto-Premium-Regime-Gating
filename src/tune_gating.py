@@ -257,8 +257,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--holdout-count",
         type=int,
-        default=1,
+        default=2,
         help="Chronological OOS holdout count when explicit train/test globs are not provided.",
+    )
+    parser.add_argument(
+        "--min-train-episodes",
+        type=int,
+        default=2,
+        help="Minimum number of train episodes required to accept the split.",
+    )
+    parser.add_argument(
+        "--min-oos-episodes",
+        type=int,
+        default=2,
+        help="Minimum number of OOS episodes required to accept the split.",
     )
     parser.add_argument(
         "--oos-weight",
@@ -331,6 +343,17 @@ def main() -> None:
 
     if not train_matrices:
         raise RuntimeError("Training split is empty after compatibility filtering.")
+    if len(train_matrices) < max(1, int(args.min_train_episodes)):
+        raise RuntimeError(
+            "Training split is too small for robust selection: "
+            f"got {len(train_matrices)} episodes, require >= {int(args.min_train_episodes)}."
+        )
+    if len(oos_matrices) < max(1, int(args.min_oos_episodes)):
+        raise RuntimeError(
+            "OOS split is too small for robust validation: "
+            f"got {len(oos_matrices)} episodes, require >= {int(args.min_oos_episodes)}. "
+            "Add more episodes or pass explicit --train-episodes/--test-episodes."
+        )
 
     _print_matrix_block("Train episodes:", train_matrices)
     _print_matrix_block("OOS episodes:", oos_matrices)

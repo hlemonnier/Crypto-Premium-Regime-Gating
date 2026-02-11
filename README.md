@@ -166,10 +166,16 @@ python -m src.binance_data \
   --start 2024-08-05 \
   --end 2024-08-06 \
   --market futures \
+  --futures-price-source mark \
   --episode-name yen_unwind_2024_binance \
   --run-pipeline \
   --skip-existing
 ```
+
+Price convention note:
+
+- for Binance futures, default source is now `markPriceKlines` (`--futures-price-source mark`) rather than trade `close` klines.
+- alternative sources are available (`last`, `index`, `premium`) but `mark` is the recommended default for this project.
 
 For older windows (for example March 2023), Binance public data may not contain USDC quote pairs; the CLI prints an explicit availability error in that case.
 
@@ -215,13 +221,16 @@ Grid-search regime + strategy gating parameters with an explicit out-of-sample h
 ```bash
 python -m src.tune_gating \
   --episodes "data/processed/episodes/*2024_binance/prices_matrix.csv" \
-  --holdout-count 1 \
+  --holdout-count 2 \
+  --min-train-episodes 2 \
+  --min-oos-episodes 2 \
   --apply
 ```
 
 Default tuning split behavior:
 
 - when `--train-episodes/--test-episodes` are not provided, episodes are sorted chronologically and the last `--holdout-count` episodes are used as OOS.
+- fail-closed defaults require at least `--min-train-episodes` and `--min-oos-episodes`; tuning aborts if the split is too small.
 - output includes both `train_*` and `oos_*` metrics plus `selection_score`.
 - selection defaults to a blended score (`--oos-weight 0.5`).
 
@@ -289,8 +298,18 @@ Build execution diagnostics from `prices_resampled.csv` (price + volume bars):
 python -m src.execution_quality --output-dir reports/final
 ```
 
+Fail-closed behavior:
+
+- by default, execution conclusions are blocked unless each episode has both L2 orderbook + tick-trade inputs under `data/processed/orderbook/<episode>/...`.
+- to force bar-proxy diagnostics when L2 is missing (not recommended for venue/quote ranking), pass:
+
+```bash
+python -m src.execution_quality --output-dir reports/final --allow-bar-proxy-without-l2
+```
+
 Artifacts:
 
+- `reports/final/execution_l2_coverage.csv`
 - `reports/final/execution_slippage_proxy.csv`
 - `reports/final/execution_cross_quote_comparison.csv`
 - `reports/final/execution_resilience.csv`
