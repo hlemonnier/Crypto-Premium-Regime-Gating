@@ -1,4 +1,4 @@
-venue,n_root_episode_pairs,usdc_preferred_count,usdt_preferred_count,mean_delta_usdc_minus_usdt_bps,median_recovery_bars_usdc,median_recovery_bars_usdt,mean_unrecovered_ratio_usdc,mean_unrecovered_ratio_usdt
-binance,12,11,1,-1.1477456886993214,3.0,3.5,0.0,0.0028735632183908046
-bybit,3,1,2,0.7707692573832367,2.0,2.5,0.0,0.0
-okx,2,2,0,-4.030720826391918,1.0,4.0,0.0,0.0
+venue,market_type,n_root_episode_pairs,mean_delta_large_raw_bps,median_delta_large_raw_bps,mean_delta_large_excess_bps,median_delta_large_excess_bps,mean_delta_large_norm,median_delta_large_norm,n_indeterminate_norm,median_recovery_bars_usdc,median_recovery_bars_usdt,mean_unrecovered_ratio_usdc,mean_unrecovered_ratio_usdt
+binance,derivatives,12,-0.8827801103027132,-0.6864987225999517,-0.9176489209573259,-0.6861711141771227,-0.09166204921396866,-0.07519773949623931,3,3.0,3.0,0.0,0.0028735632183908046
+bybit,spot,3,0.7707692573832367,0.9292591601748637,0.8736541515010544,1.0373677613222223,1.0091237301632352,-0.13886854146566674,0,2.0,2.5,0.0,0.0
+okx,derivatives,2,-4.030720826391918,-4.030720826391918,-2.0570243414796168,-2.0570243414796168,0.3839979429215743,0.3839979429215743,0,1.0,4.0,0.0,0.0

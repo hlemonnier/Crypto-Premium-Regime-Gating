@@ -10,6 +10,7 @@ import pandas as pd
 import yaml
 
 from src.backtest import BacktestConfig, compare_strategies, export_metrics
+from src.data_ingest import sanitize_single_bar_spikes
 from src.hawkes import HawkesConfig, estimate_hawkes_rolling
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.plots import (
@@ -43,7 +44,14 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return data
 
 
-def load_price_matrix(path: str | Path) -> pd.DataFrame:
+def load_price_matrix(
+    path: str | Path,
+    *,
+    sanitize_pair_spikes: bool = True,
+    single_bar_spike_jump_log: float = 0.015,
+    single_bar_spike_reversion_log: float = 0.003,
+    single_bar_spike_counterpart_max_log: float = 0.002,
+) -> pd.DataFrame:
     matrix_path = Path(path)
     if not matrix_path.exists():
         raise FileNotFoundError(f"Price matrix not found: {matrix_path}")
@@ -81,6 +89,19 @@ def load_price_matrix(path: str | Path) -> pd.DataFrame:
         frame = frame.loc[~frame.index.duplicated(keep="last")]
 
     frame = frame.sort_index()
+
+    if sanitize_pair_spikes:
+        frame, diagnostics = sanitize_single_bar_spikes(
+            frame,
+            jump_threshold_log=single_bar_spike_jump_log,
+            reversion_tolerance_log=single_bar_spike_reversion_log,
+            counterpart_max_move_log=single_bar_spike_counterpart_max_log,
+        )
+        if not diagnostics.empty:
+            warnings.warn(
+                f"Corrected {diagnostics.shape[0]} single-bar stablecoin spike points from {matrix_path}.",
+                stacklevel=2,
+            )
     return frame
 
 
@@ -258,13 +279,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    data_cfg = config.get("data", {})
     matrix_path = args.price_matrix or config.get("data", {}).get("price_matrix_path")
     if not matrix_path:
         raise ValueError(
             "No price matrix path provided. Set data.price_matrix_path in config or pass --price-matrix."
         )
 
-    price_matrix = load_price_matrix(matrix_path)
+    price_matrix = load_price_matrix(
+        matrix_path,
+        sanitize_pair_spikes=bool(data_cfg.get("sanitize_single_bar_spikes", True)),
+        single_bar_spike_jump_log=float(data_cfg.get("single_bar_spike_jump_log", 0.015)),
+        single_bar_spike_reversion_log=float(data_cfg.get("single_bar_spike_reversion_log", 0.003)),
+        single_bar_spike_counterpart_max_log=float(data_cfg.get("single_bar_spike_counterpart_max_log", 0.002)),
+    )
     results = run_pipeline(config, price_matrix)
     exported = export_outputs(results, config)
 

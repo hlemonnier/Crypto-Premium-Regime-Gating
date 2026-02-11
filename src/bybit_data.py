@@ -202,7 +202,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episode-name", default=None, help="Optional custom episode name.")
     parser.add_argument("--resample-rule", default="1min", help="Target resample rule.")
     parser.add_argument("--ffill-limit", type=int, default=2, help="Forward-fill limit.")
-    parser.add_argument("--glitch-sigma-threshold", type=float, default=20.0, help="Glitch filter threshold.")
+    parser.add_argument("--glitch-sigma-threshold", type=float, default=12.0, help="Glitch filter threshold.")
     parser.add_argument("--run-pipeline", action="store_true", help="Run full premium pipeline after ingest.")
     parser.add_argument("--config", default="configs/config.yaml", help="Pipeline config path.")
     parser.add_argument("--reports-root", default="reports/episodes", help="Per-episode reports root.")

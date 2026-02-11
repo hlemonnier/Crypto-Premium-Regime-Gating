@@ -100,6 +100,9 @@ Loader safety behavior:
 
 - rows with invalid timestamps are dropped with warning
 - duplicate timestamps are deduplicated with `keep='last'` and warning
+- matched USDC/USDT pairs are sanitized for one-bar stale spikes by default
+  - rule: large jump + immediate opposite reversion + quiet counterpart leg
+  - action: replace suspected stale point with previous bar value
 
 Target contract handling is now auto-adaptive by default:
 
@@ -297,6 +300,9 @@ Artifacts:
 Method limitation:
 
 - this is a bar-level proxy (impact/resilience) and does **not** replace order-book snapshot slippage/depth analytics.
+- volatility control is reported via excess and normalized impact proxies (raw bps, excess bps, normalized by local median abs-return).
+- cross-venue comparison is segmented by `market_type` (`spot` vs `derivatives`) to avoid non-homogeneous venue ranking.
+- do not infer a definitive "best liquidity venue/quote" from this section without L2 order-book replay and instrument/fee/funding normalization.
 
 ## Ablation report (single script)
 

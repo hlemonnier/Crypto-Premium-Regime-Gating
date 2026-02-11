@@ -4,6 +4,10 @@ project:
 data:
   resample_rule: 1min
   ffill_limit: 2
+  sanitize_single_bar_spikes: true
+  single_bar_spike_jump_log: 0.015
+  single_bar_spike_reversion_log: 0.003
+  single_bar_spike_counterpart_max_log: 0.002
   price_matrix_path: data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv
 data_sources:
   binance: https://data.binance.vision/?prefix=data/

@@ -74,6 +74,71 @@ def _read_proxy_coverage(episode: str, reports_root: Path) -> dict[str, Any] | N
     return {"episode": episode, "proxy_component_count": int(len(cols))}
 
 
+def _read_pnl_localization(
+    episode: str,
+    variant: str,
+    reports_root: Path,
+    *,
+    window_bars: int = 10,
+) -> dict[str, Any] | None:
+    path = reports_root / "episodes" / episode / "tables" / f"trade_log_{variant}.csv"
+    if not path.exists():
+        return None
+    frame = pd.read_csv(path)
+    if "net_pnl" not in frame.columns:
+        return None
+
+    pnl = pd.to_numeric(frame["net_pnl"], errors="coerce").fillna(0.0)
+    net = float(pnl.sum())
+    abs_sum = float(pnl.abs().sum())
+    positive_sum = float(pnl[pnl > 0].sum())
+    abs_sorted = pnl.abs().sort_values(ascending=False)
+    top1_share = float(abs_sorted.head(1).sum() / abs_sum) if abs_sum > 0 else 0.0
+    top3_share = float(abs_sorted.head(3).sum() / abs_sum) if abs_sum > 0 else 0.0
+    top5_share = float(abs_sorted.head(5).sum() / abs_sum) if abs_sum > 0 else 0.0
+
+    best_window_sum = np.nan
+    best_window_share_of_net = np.nan
+    best_window_share_of_positive = np.nan
+    best_window_start = None
+    best_window_end = None
+    w = max(2, int(window_bars))
+    if len(pnl) >= w:
+        rolling = pnl.rolling(w).sum()
+        best_idx = int(rolling.idxmax())
+        best_window_sum = float(rolling.iloc[best_idx])
+        if net > 0:
+            best_window_share_of_net = float(best_window_sum / net)
+        if positive_sum > 0:
+            best_window_share_of_positive = float(best_window_sum / positive_sum)
+        if "timestamp_utc" in frame.columns:
+            best_window_start = frame.iloc[best_idx - w + 1]["timestamp_utc"]
+            best_window_end = frame.iloc[best_idx]["timestamp_utc"]
+
+    localized_positive = bool(
+        net > 1e-4
+        and np.isfinite(best_window_share_of_net)
+        and best_window_share_of_net >= 0.5
+    )
+    return {
+        "episode": episode,
+        "variant": variant,
+        "net_pnl": net,
+        "abs_pnl_sum": abs_sum,
+        "positive_pnl_sum": positive_sum,
+        "top1_abs_pnl_share": top1_share,
+        "top3_abs_pnl_share": top3_share,
+        "top5_abs_pnl_share": top5_share,
+        "best_window_bars": w,
+        "best_window_sum_pnl": best_window_sum,
+        "best_window_share_of_net_pnl": best_window_share_of_net,
+        "best_window_share_of_positive_pnl": best_window_share_of_positive,
+        "best_window_start": best_window_start,
+        "best_window_end": best_window_end,
+        "localized_positive_pnl_flag": localized_positive,
+    }
+
+
 def _plot_metric_comparison(wide: pd.DataFrame, metric: str, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     episodes = list(wide.index)
@@ -116,6 +181,7 @@ def main() -> None:
     metric_frames: list[pd.DataFrame] = []
     onchain_rows: list[dict[str, Any]] = []
     proxy_rows: list[dict[str, Any]] = []
+    localization_rows: list[dict[str, Any]] = []
     for episode in args.episodes:
         frame = _read_metrics_for_episode(episode, reports_root)
         if frame is not None:
@@ -126,6 +192,10 @@ def main() -> None:
         proxy = _read_proxy_coverage(episode, reports_root)
         if proxy is not None:
             proxy_rows.append(proxy)
+        for variant in ("naive", "gated"):
+            loc = _read_pnl_localization(episode, variant, reports_root)
+            if loc is not None:
+                localization_rows.append(loc)
 
     if not metric_frames:
         raise FileNotFoundError("No episode metrics found for selected episodes.")
@@ -175,6 +245,10 @@ def main() -> None:
     proxy_path = output_dir / "final_proxy_coverage.csv"
     if not proxy_df.empty:
         proxy_df.to_csv(proxy_path, index=False)
+    localization_df = pd.DataFrame(localization_rows).sort_values(["episode", "variant"]) if localization_rows else pd.DataFrame()
+    localization_path = output_dir / "final_pnl_localization.csv"
+    if not localization_df.empty:
+        localization_df.to_csv(localization_path, index=False)
 
     calibration_details_path = output_dir / "calibration_details.csv"
     calibration_agg_path = output_dir / "calibration_aggregate.csv"
@@ -185,7 +259,7 @@ def main() -> None:
     execution_resilience_path = output_dir / "execution_resilience.csv"
     execution_venue_path = output_dir / "execution_venue_comparison.csv"
     execution_venue_df = (
-        pd.read_csv(execution_venue_path).sort_values("venue")
+        pd.read_csv(execution_venue_path).sort_values(["venue", "market_type"])
         if execution_venue_path.exists()
         else pd.DataFrame()
     )
@@ -226,6 +300,10 @@ def main() -> None:
                 )
                 handle.write(f"- Episodes with Sharpe improvement: `{sharpe_up}/{sharpe_total}`\n")
                 handle.write(f"- Episodes with Sharpe degradation: `{sharpe_down}/{sharpe_total}`\n")
+                if float(sharpe_valid.mean()) > 0:
+                    handle.write("- Conclusion (Sharpe): gated improvement is positive on average.\n")
+                else:
+                    handle.write("- Conclusion (Sharpe): gated improvement is **not** demonstrated on average.\n")
 
         if "pnl_net_gated" in wide_for_plot.columns and "pnl_net_naive" in wide_for_plot.columns:
             pnl_delta = wide_for_plot["pnl_net_gated"] - wide_for_plot["pnl_net_naive"]
@@ -242,6 +320,10 @@ def main() -> None:
                 )
                 handle.write(f"- Episodes with PnL improvement: `{pnl_up}/{pnl_total}`\n")
                 handle.write(f"- Episodes with PnL degradation: `{pnl_down}/{pnl_total}`\n")
+                if float(pnl_valid.mean()) > 0:
+                    handle.write("- Conclusion (PnL): gated improvement is positive on average.\n")
+                else:
+                    handle.write("- Conclusion (PnL): gated improvement is **not** demonstrated on average.\n")
 
         if not onchain_df.empty:
             handle.write("\n## On-Chain Validation Snapshot\n\n")
@@ -259,14 +341,61 @@ def main() -> None:
                 "When coverage is missing, treat the episode primarily as depeg safety/on-chain validation.\n"
             )
 
+        if not localization_df.empty:
+            handle.write("\n## PnL Localization Diagnostics\n\n")
+            show_cols = [
+                "episode",
+                "variant",
+                "net_pnl",
+                "top1_abs_pnl_share",
+                "top3_abs_pnl_share",
+                "top5_abs_pnl_share",
+                "best_window_bars",
+                "best_window_share_of_net_pnl",
+                "best_window_share_of_positive_pnl",
+                "localized_positive_pnl_flag",
+                "best_window_start",
+                "best_window_end",
+            ]
+            show_cols = [c for c in show_cols if c in localization_df.columns]
+            handle.write("```text\n")
+            handle.write(localization_df[show_cols].to_string(index=False))
+            handle.write("\n```\n")
+            naive_loc = localization_df[localization_df["variant"] == "naive"].copy()
+            naive_pos = naive_loc[naive_loc["net_pnl"] > 0]
+            localized_pos = naive_pos["localized_positive_pnl_flag"].astype(bool).sum()
+            total_pos = int(naive_pos.shape[0])
+            if total_pos > 0:
+                handle.write(
+                    f"\n- Naive positive-PnL episodes with >50% of net PnL explained by one "
+                    f"`{int(localization_df['best_window_bars'].iloc[0])}`-bar window: "
+                    f"`{int(localized_pos)}/{total_pos}`.\n"
+                )
+            handle.write(
+                "Interpretation: when `localized_positive_pnl_flag` is true, performance is structurally fragile "
+                "and should not be treated as robust signal quality.\n"
+            )
+
         if not execution_venue_df.empty:
-            handle.write("\n## Execution Quality Snapshot\n\n")
+            handle.write("\n## Execution Proxy Snapshot (Bar-Level)\n\n")
             handle.write("```text\n")
             handle.write(execution_venue_df.to_string(index=False))
             handle.write("\n```\n")
             handle.write(
-                "\nInterpretation: lower `mean_delta_usdc_minus_usdt_bps` indicates lower large-size impact "
-                "in USDC quotes versus USDT for the same root/venue.\n"
+                "\nInterpretation: compare raw, excess, and normalized deltas jointly. "
+                "A negative delta means lower proxy impact in USDC quotes versus USDT for the same root/venue.\n"
+            )
+            handle.write(
+                "Scope note: this section is a bar-level proxy and does not validate order-book "
+                "microstructure items from the Mike brief.\n"
+            )
+            handle.write(
+                "Comparability note: venue comparisons are only defensible within the same `market_type` "
+                "(`spot` vs `derivatives`).\n"
+            )
+            handle.write(
+                "Decision guardrail: do not conclude 'better liquidity' without L2 order-book replay "
+                "(book-walk), and normalization of tick/lot/fees/funding/contract specs.\n"
             )
 
         handle.write("\n## Generated Artifacts\n\n")
@@ -279,6 +408,8 @@ def main() -> None:
             handle.write(f"- `{onchain_path}`\n")
         if not proxy_df.empty:
             handle.write(f"- `{proxy_path}`\n")
+        if not localization_df.empty:
+            handle.write(f"- `{localization_path}`\n")
         if execution_report_path.exists():
             handle.write(f"- `{execution_report_path}`\n")
         if execution_slippage_path.exists():

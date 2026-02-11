@@ -33,6 +33,25 @@ def _parse_symbol(symbol: str) -> tuple[str, str, str] | None:
     return None
 
 
+def _market_type_from_suffix(suffix: str | None) -> str:
+    s = str(suffix or "").upper()
+    if s == "SPOT":
+        return "spot"
+    if s == "PERP" or s.isdigit():
+        return "derivatives"
+    return "unknown"
+
+
+def _preference_from_delta(delta: float, *, tolerance: float) -> str:
+    if not np.isfinite(delta):
+        return "indeterminate"
+    if delta < -tolerance:
+        return "USDC"
+    if delta > tolerance:
+        return "USDT"
+    return "indeterminate"
+
+
 def _load_episode_resampled(episode: str, processed_root: Path) -> pd.DataFrame | None:
     path = processed_root / episode / "prices_resampled.csv"
     if not path.exists():
@@ -56,7 +75,9 @@ def _load_episode_resampled(episode: str, processed_root: Path) -> pd.DataFrame 
     frame["root"] = parsed.map(lambda x: x[0] if x else None)
     frame["quote"] = parsed.map(lambda x: x[1] if x else None)
     frame["suffix"] = parsed.map(lambda x: x[2] if x else None)
+    frame["market_type"] = frame["suffix"].map(_market_type_from_suffix)
     frame = frame[frame["quote"].isin(["USDC", "USDT"])].copy()
+    frame = frame[frame["market_type"].isin(["spot", "derivatives"])].copy()
     return frame
 
 
@@ -65,15 +86,33 @@ def build_enriched_trade_frame(
     *,
     size_window: int = 60,
     min_size_periods: int = 20,
+    vol_window: int | None = None,
+    min_vol_periods: int | None = None,
+    norm_floor_bps: float = 1.0,
 ) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
-    group_cols = ["episode", "venue", "symbol"]
+    vol_window_eff = max(2, int(size_window if vol_window is None else vol_window))
+    min_vol_periods_eff = max(2, int(min_size_periods if min_vol_periods is None else min_vol_periods))
+    group_cols = ["episode", "venue", "market_type", "symbol"]
     for _, group in raw.groupby(group_cols, sort=False):
         g = group.sort_values("timestamp_utc").copy()
         g["log_price"] = np.log(g["price"].astype(float).clip(lower=1e-12))
         g["ret_bps"] = g["log_price"].diff() * 1e4
         g["abs_ret_bps"] = g["ret_bps"].abs()
         g["fwd_abs_ret_bps"] = g["abs_ret_bps"].shift(-1)
+        # Robust local volatility baseline to reduce volatility/impact confounding.
+        rolling_absret_med = (
+            g["abs_ret_bps"]
+            .astype(float)
+            .rolling(window=vol_window_eff, min_periods=min_vol_periods_eff)
+            .median()
+            .shift(1)
+        )
+        g["rolling_median_abs_ret_bps"] = rolling_absret_med
+        g["fwd_abs_ret_excess_bps"] = g["fwd_abs_ret_bps"] - rolling_absret_med
+        denom_floor = max(1e-6, float(norm_floor_bps))
+        denom = rolling_absret_med.clip(lower=denom_floor)
+        g["fwd_abs_ret_norm"] = g["fwd_abs_ret_bps"] / denom
 
         rolling_med_vol = (
             g["volume"]
@@ -96,7 +135,7 @@ def build_enriched_trade_frame(
 
 def build_slippage_proxy(enriched: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
-    keys = ["episode", "venue", "root", "quote", "symbol"]
+    keys = ["episode", "venue", "market_type", "root", "quote", "symbol"]
     for key, group in enriched.groupby(keys, sort=False):
         g = group.copy()
         valid = g["fwd_abs_ret_bps"].notna() & g["rel_size"].notna() & g["volume"].notna()
@@ -112,17 +151,43 @@ def build_slippage_proxy(enriched: pd.DataFrame) -> pd.DataFrame:
             {
                 "episode": key[0],
                 "venue": key[1],
-                "root": key[2],
-                "quote": key[3],
-                "symbol": key[4],
+                "market_type": key[2],
+                "root": key[3],
+                "quote": key[4],
+                "symbol": key[5],
                 "n_obs": int(g.shape[0]),
                 "median_volume": float(g["volume"].median()),
                 "median_rel_size": float(g["rel_size"].median()),
                 "q90_rel_size": q90,
+                "baseline_vol_median_bps": float(pd.to_numeric(g["rolling_median_abs_ret_bps"], errors="coerce").median()),
                 "impact_all_mean_bps": float(g["fwd_abs_ret_bps"].mean()),
                 "impact_all_median_bps": float(g["fwd_abs_ret_bps"].median()),
                 "impact_large_mean_bps": float(g.loc[large, "fwd_abs_ret_bps"].mean()) if large_count > 0 else np.nan,
                 "impact_large_median_bps": float(g.loc[large, "fwd_abs_ret_bps"].median()) if large_count > 0 else np.nan,
+                "impact_all_mean_excess_bps": float(pd.to_numeric(g["fwd_abs_ret_excess_bps"], errors="coerce").mean()),
+                "impact_all_median_excess_bps": float(pd.to_numeric(g["fwd_abs_ret_excess_bps"], errors="coerce").median()),
+                "impact_large_mean_excess_bps": (
+                    float(pd.to_numeric(g.loc[large, "fwd_abs_ret_excess_bps"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_large_median_excess_bps": (
+                    float(pd.to_numeric(g.loc[large, "fwd_abs_ret_excess_bps"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_all_mean_norm": float(pd.to_numeric(g["fwd_abs_ret_norm"], errors="coerce").mean()),
+                "impact_all_median_norm": float(pd.to_numeric(g["fwd_abs_ret_norm"], errors="coerce").median()),
+                "impact_large_mean_norm": (
+                    float(pd.to_numeric(g.loc[large, "fwd_abs_ret_norm"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_large_median_norm": (
+                    float(pd.to_numeric(g.loc[large, "fwd_abs_ret_norm"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
                 "large_count": large_count,
             }
         )
@@ -130,48 +195,52 @@ def build_slippage_proxy(enriched: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
-    return out.sort_values(["episode", "venue", "root", "quote"]).reset_index(drop=True)
+    return out.sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(drop=True)
 
 
-def build_cross_quote_comparison(slippage: pd.DataFrame) -> pd.DataFrame:
+def build_cross_quote_comparison(slippage: pd.DataFrame, *, norm_delta_tolerance: float = 0.05) -> pd.DataFrame:
     if slippage.empty:
         return pd.DataFrame()
 
     rows: list[dict[str, Any]] = []
-    for (episode, venue, root), group in slippage.groupby(["episode", "venue", "root"], sort=False):
+    for (episode, venue, market_type, root), group in slippage.groupby(
+        ["episode", "venue", "market_type", "root"], sort=False
+    ):
         by_quote = {quote: q for quote, q in group.groupby("quote")}
         if "USDC" not in by_quote or "USDT" not in by_quote:
             continue
 
         usdc = by_quote["USDC"].iloc[0]
         usdt = by_quote["USDT"].iloc[0]
-        delta = float(usdc["impact_large_mean_bps"] - usdt["impact_large_mean_bps"])
-        if np.isnan(delta):
-            preferred = "undetermined"
-        elif delta < 0:
-            preferred = "USDC"
-        elif delta > 0:
-            preferred = "USDT"
-        else:
-            preferred = "tie"
+        delta_raw = float(usdc["impact_large_mean_bps"] - usdt["impact_large_mean_bps"])
+        delta_excess = float(usdc["impact_large_mean_excess_bps"] - usdt["impact_large_mean_excess_bps"])
+        delta_norm = float(usdc["impact_large_mean_norm"] - usdt["impact_large_mean_norm"])
+        preferred_norm = _preference_from_delta(delta_norm, tolerance=norm_delta_tolerance)
 
         rows.append(
             {
                 "episode": episode,
                 "venue": venue,
+                "market_type": market_type,
                 "root": root,
                 "impact_large_mean_bps_usdc": float(usdc["impact_large_mean_bps"]),
                 "impact_large_mean_bps_usdt": float(usdt["impact_large_mean_bps"]),
-                "impact_large_delta_usdc_minus_usdt_bps": delta,
+                "impact_large_delta_usdc_minus_usdt_bps": delta_raw,
+                "impact_large_mean_excess_bps_usdc": float(usdc["impact_large_mean_excess_bps"]),
+                "impact_large_mean_excess_bps_usdt": float(usdt["impact_large_mean_excess_bps"]),
+                "impact_large_delta_excess_usdc_minus_usdt_bps": delta_excess,
+                "impact_large_mean_norm_usdc": float(usdc["impact_large_mean_norm"]),
+                "impact_large_mean_norm_usdt": float(usdt["impact_large_mean_norm"]),
+                "impact_large_delta_norm_usdc_minus_usdt": delta_norm,
                 "impact_all_mean_bps_usdc": float(usdc["impact_all_mean_bps"]),
                 "impact_all_mean_bps_usdt": float(usdt["impact_all_mean_bps"]),
-                "preferred_quote_on_large": preferred,
+                "preferred_quote_on_large_norm": preferred_norm,
             }
         )
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["episode", "venue", "root"]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(["episode", "venue", "market_type", "root"]).reset_index(drop=True)
 
 
 def build_resilience_table(
@@ -181,7 +250,7 @@ def build_resilience_table(
     shock_quantile: float = 0.99,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
-    keys = ["episode", "venue", "root", "quote", "symbol"]
+    keys = ["episode", "venue", "market_type", "root", "quote", "symbol"]
     for key, group in enriched.groupby(keys, sort=False):
         g = group.sort_values("timestamp_utc").reset_index(drop=True)
         ret = g["abs_ret_bps"].astype(float)
@@ -213,9 +282,10 @@ def build_resilience_table(
             {
                 "episode": key[0],
                 "venue": key[1],
-                "root": key[2],
-                "quote": key[3],
-                "symbol": key[4],
+                "market_type": key[2],
+                "root": key[3],
+                "quote": key[4],
+                "symbol": key[5],
                 "shock_threshold_bps": threshold,
                 "baseline_abs_ret_bps": baseline,
                 "n_shocks": int(len(shock_idx)),
@@ -228,7 +298,9 @@ def build_resilience_table(
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["episode", "venue", "root", "quote"]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(
+        drop=True
+    )
 
 
 def build_venue_summary(comparison: pd.DataFrame, resilience: pd.DataFrame) -> pd.DataFrame:
@@ -236,14 +308,18 @@ def build_venue_summary(comparison: pd.DataFrame, resilience: pd.DataFrame) -> p
         return pd.DataFrame()
 
     cmp_agg = (
-        comparison.groupby("venue", as_index=False)
+        comparison.groupby(["venue", "market_type"], as_index=False)
         .agg(
             n_root_episode_pairs=("root", "count"),
-            usdc_preferred_count=("preferred_quote_on_large", lambda s: int((s == "USDC").sum())),
-            usdt_preferred_count=("preferred_quote_on_large", lambda s: int((s == "USDT").sum())),
-            mean_delta_usdc_minus_usdt_bps=("impact_large_delta_usdc_minus_usdt_bps", "mean"),
+            mean_delta_large_raw_bps=("impact_large_delta_usdc_minus_usdt_bps", "mean"),
+            median_delta_large_raw_bps=("impact_large_delta_usdc_minus_usdt_bps", "median"),
+            mean_delta_large_excess_bps=("impact_large_delta_excess_usdc_minus_usdt_bps", "mean"),
+            median_delta_large_excess_bps=("impact_large_delta_excess_usdc_minus_usdt_bps", "median"),
+            mean_delta_large_norm=("impact_large_delta_norm_usdc_minus_usdt", "mean"),
+            median_delta_large_norm=("impact_large_delta_norm_usdc_minus_usdt", "median"),
+            n_indeterminate_norm=("preferred_quote_on_large_norm", lambda s: int((s == "indeterminate").sum())),
         )
-        .sort_values("venue")
+        .sort_values(["venue", "market_type"])
         .reset_index(drop=True)
     )
 
@@ -251,18 +327,18 @@ def build_venue_summary(comparison: pd.DataFrame, resilience: pd.DataFrame) -> p
         return cmp_agg
 
     res_agg = (
-        resilience.groupby(["venue", "quote"], as_index=False)
+        resilience.groupby(["venue", "market_type", "quote"], as_index=False)
         .agg(
             median_recovery_bars=("recovery_median_bars", "median"),
             mean_unrecovered_ratio=("unrecovered_ratio", "mean"),
         )
     )
-    res_pivot = res_agg.pivot(index="venue", columns="quote")
+    res_pivot = res_agg.pivot(index=["venue", "market_type"], columns="quote")
     res_pivot.columns = [f"{metric}_{quote.lower()}" for metric, quote in res_pivot.columns]
     res_pivot = res_pivot.reset_index()
 
-    merged = cmp_agg.merge(res_pivot, on="venue", how="left")
-    return merged.sort_values("venue").reset_index(drop=True)
+    merged = cmp_agg.merge(res_pivot, on=["venue", "market_type"], how="left")
+    return merged.sort_values(["venue", "market_type"]).reset_index(drop=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -279,6 +355,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="reports/final", help="Output folder for execution diagnostics.")
     parser.add_argument("--size-window", type=int, default=60, help="Rolling window for relative size proxy.")
     parser.add_argument("--min-size-periods", type=int, default=20, help="Min periods for rolling size baseline.")
+    parser.add_argument(
+        "--norm-floor-bps",
+        type=float,
+        default=1.0,
+        help="Lower bound in bps for volatility normalization denominator.",
+    )
+    parser.add_argument(
+        "--norm-delta-tolerance",
+        type=float,
+        default=0.05,
+        help="Indifference band for normalized USDC-USDT large-size delta classification.",
+    )
     parser.add_argument("--resilience-horizon", type=int, default=60, help="Forward bars to look for recovery.")
     parser.add_argument("--shock-quantile", type=float, default=0.99, help="Shock threshold quantile.")
     return parser.parse_args()
@@ -307,9 +395,13 @@ def main() -> None:
         raw,
         size_window=args.size_window,
         min_size_periods=args.min_size_periods,
+        norm_floor_bps=args.norm_floor_bps,
     )
     slippage = build_slippage_proxy(enriched)
-    comparison = build_cross_quote_comparison(slippage)
+    comparison = build_cross_quote_comparison(
+        slippage,
+        norm_delta_tolerance=args.norm_delta_tolerance,
+    )
     resilience = build_resilience_table(
         enriched,
         horizon_bars=args.resilience_horizon,
@@ -329,8 +421,8 @@ def main() -> None:
     venue_summary.to_csv(venue_path, index=False)
 
     with report_path.open("w", encoding="utf-8") as handle:
-        handle.write("# Execution Quality Diagnostics\n\n")
-        handle.write("This report extends stablecoin analysis with execution-quality proxies.\n\n")
+        handle.write("# Execution Proxy Diagnostics (Bar-Level)\n\n")
+        handle.write("This report extends stablecoin analysis with bar-level execution proxies.\n\n")
         handle.write("## Scope\n\n")
         for ep in args.episodes:
             handle.write(f"- `{ep}`\n")
@@ -342,20 +434,39 @@ def main() -> None:
         handle.write("\n## Method Notes\n\n")
         handle.write("- Data source: `prices_resampled.csv` (price + volume bars).\n")
         handle.write("- Slippage proxy: next-bar absolute return (bps) conditioned on relative size (`volume / rolling median volume`).\n")
+        handle.write(
+            "- Volatility control: report large-size deltas in raw bps, excess bps (`next_bar_abs_ret - local_median_abs_ret`), "
+            "and normalized units (`next_bar_abs_ret / local_median_abs_ret`).\n"
+        )
+        handle.write(f"- Normalization floor: local volatility denominator floored at `{args.norm_floor_bps:.3f}` bps.\n")
         handle.write("- Large-size bucket: top 10% relative-size bars per symbol.\n")
         handle.write("- Resilience proxy: after shock bars (`abs_ret_bps` >= quantile), bars to return to median absolute-return baseline.\n")
-        handle.write("- Limitation: this is **not** order-book snapshot slippage/depth; it is a trade-bar proxy given available data.\n")
+        handle.write(
+            "- Limitation: this is **not** order-book snapshot slippage/depth "
+            "(book-walk, DNL, queueing); it is a trade-bar proxy given available data.\n"
+        )
+        handle.write("- Comparability guardrail: cross-venue tables are segmented by `market_type` (`spot` vs `derivatives`); avoid mixing them for venue ranking.\n")
 
         if not comparison.empty:
             handle.write("\n## Cross-Quote Comparison (USDC vs USDT)\n\n")
             handle.write("```text\n")
             handle.write(comparison.to_string(index=False))
             handle.write("\n```\n")
-            usdc_better = int((comparison["preferred_quote_on_large"] == "USDC").sum())
-            usdt_better = int((comparison["preferred_quote_on_large"] == "USDT").sum())
-            total = int(comparison.shape[0])
-            handle.write(f"\n- USDC preferred on large-size proxy impact: `{usdc_better}/{total}`\n")
-            handle.write(f"- USDT preferred on large-size proxy impact: `{usdt_better}/{total}`\n")
+            for market_type, group in comparison.groupby("market_type", sort=True):
+                usdc_better = int((group["preferred_quote_on_large_norm"] == "USDC").sum())
+                usdt_better = int((group["preferred_quote_on_large_norm"] == "USDT").sum())
+                indeterminate = int((group["preferred_quote_on_large_norm"] == "indeterminate").sum())
+                total = int(group.shape[0])
+                handle.write(
+                    f"\n- `{market_type}` (normalized delta, tolerance={args.norm_delta_tolerance:.3f}): "
+                    f"USDC lower-proxy-impact `{usdc_better}/{total}`, "
+                    f"USDT lower-proxy-impact `{usdt_better}/{total}`, "
+                    f"indeterminate `{indeterminate}/{total}`.\n"
+                )
+            handle.write(
+                "\nInterpretation guardrail: these are descriptive bar-level proxy gaps only; "
+                "they are insufficient to rank venues for execution quality.\n"
+            )
 
         if not resilience.empty:
             handle.write("\n## Resilience Summary\n\n")
@@ -364,7 +475,7 @@ def main() -> None:
             handle.write("\n```\n")
 
         if not venue_summary.empty:
-            handle.write("\n## Venue Summary\n\n")
+            handle.write("\n## Venue Summary (Within Market Type)\n\n")
             handle.write("```text\n")
             handle.write(venue_summary.to_string(index=False))
             handle.write("\n```\n")

@@ -9,7 +9,8 @@ import pandas as pd
 
 from src.backtest import periods_per_year_from_freq, run_backtest
 from src.bybit_data import bybit_interval_to_ms
-from src.data_ingest import _remove_glitches
+from src.data_ingest import _remove_glitches, sanitize_single_bar_spikes
+from src.execution_quality import build_cross_quote_comparison, build_venue_summary
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.pipeline import load_price_matrix
 from src.premium import PremiumConfig, build_premium_frame
@@ -335,6 +336,124 @@ class GlitchFilterTests(unittest.TestCase):
         filtered = _remove_glitches(raw, sigma_threshold=2.0)
         # A smooth, shifted return process should not be aggressively removed.
         self.assertGreaterEqual(filtered.shape[0], 35)
+
+
+class StablecoinSpikeSanitizerTests(unittest.TestCase):
+    def test_single_bar_stale_spike_is_replaced_with_previous_value(self) -> None:
+        idx = pd.date_range("2024-08-05 13:58:00", periods=5, freq="1min", tz="UTC")
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": [51980.0, 51938.0, 53418.0, 53180.0, 52940.0],
+                "BTCUSDT-PERP": [51968.0, 51928.0, 51928.0, 53170.0, 52936.0],
+            },
+            index=idx,
+        )
+        cleaned, diagnostics = sanitize_single_bar_spikes(
+            matrix,
+            jump_threshold_log=0.015,
+            reversion_tolerance_log=0.003,
+            counterpart_max_move_log=0.002,
+        )
+
+        spike_ts = pd.Timestamp("2024-08-05 14:00:00Z")
+        self.assertEqual(float(cleaned.loc[spike_ts, "BTCUSDC-PERP"]), float(matrix.shift(1).loc[spike_ts, "BTCUSDC-PERP"]))
+        self.assertEqual(float(cleaned.loc[spike_ts, "BTCUSDT-PERP"]), float(matrix.loc[spike_ts, "BTCUSDT-PERP"]))
+        self.assertFalse(diagnostics.empty)
+        self.assertIn("BTCUSDC-PERP", diagnostics["symbol"].astype(str).tolist())
+
+    def test_persistent_dislocation_is_not_reclassified_as_single_bar_spike(self) -> None:
+        idx = pd.date_range("2023-03-11 00:00:00", periods=6, freq="1min", tz="UTC")
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-SPOT": [20000.0, 19000.0, 18950.0, 18890.0, 18920.0, 18870.0],
+                "BTCUSDT-SPOT": [20000.0, 19990.0, 19995.0, 20010.0, 20005.0, 20000.0],
+            },
+            index=idx,
+        )
+        cleaned, diagnostics = sanitize_single_bar_spikes(
+            matrix,
+            jump_threshold_log=0.015,
+            reversion_tolerance_log=0.003,
+            counterpart_max_move_log=0.002,
+        )
+
+        pd.testing.assert_frame_equal(cleaned, matrix)
+        self.assertTrue(diagnostics.empty)
+
+
+class ExecutionProxyTests(unittest.TestCase):
+    def test_cross_quote_uses_indeterminate_band_on_normalized_delta(self) -> None:
+        slippage = pd.DataFrame(
+            [
+                {
+                    "episode": "ep",
+                    "venue": "binance",
+                    "market_type": "derivatives",
+                    "root": "BTC",
+                    "quote": "USDC",
+                    "symbol": "BTCUSDC-PERP",
+                    "impact_large_mean_bps": 15.0,
+                    "impact_large_mean_excess_bps": 2.0,
+                    "impact_large_mean_norm": 1.02,
+                    "impact_all_mean_bps": 10.0,
+                },
+                {
+                    "episode": "ep",
+                    "venue": "binance",
+                    "market_type": "derivatives",
+                    "root": "BTC",
+                    "quote": "USDT",
+                    "symbol": "BTCUSDT-PERP",
+                    "impact_large_mean_bps": 14.5,
+                    "impact_large_mean_excess_bps": 1.8,
+                    "impact_large_mean_norm": 1.00,
+                    "impact_all_mean_bps": 9.9,
+                },
+            ]
+        )
+        out = build_cross_quote_comparison(slippage, norm_delta_tolerance=0.05)
+        self.assertEqual(out.shape[0], 1)
+        self.assertEqual(str(out.loc[0, "preferred_quote_on_large_norm"]), "indeterminate")
+        self.assertAlmostEqual(float(out.loc[0, "impact_large_delta_norm_usdc_minus_usdt"]), 0.02, places=9)
+
+    def test_venue_summary_reports_descriptive_deltas_not_preferred_counts(self) -> None:
+        comparison = pd.DataFrame(
+            [
+                {
+                    "episode": "ep",
+                    "venue": "binance",
+                    "market_type": "derivatives",
+                    "root": "BTC",
+                    "impact_large_delta_usdc_minus_usdt_bps": -0.5,
+                    "impact_large_delta_excess_usdc_minus_usdt_bps": -0.2,
+                    "impact_large_delta_norm_usdc_minus_usdt": -0.1,
+                    "preferred_quote_on_large_norm": "USDC",
+                }
+            ]
+        )
+        resilience = pd.DataFrame(
+            [
+                {
+                    "venue": "binance",
+                    "market_type": "derivatives",
+                    "quote": "USDC",
+                    "recovery_median_bars": 3.0,
+                    "unrecovered_ratio": 0.0,
+                },
+                {
+                    "venue": "binance",
+                    "market_type": "derivatives",
+                    "quote": "USDT",
+                    "recovery_median_bars": 4.0,
+                    "unrecovered_ratio": 0.1,
+                },
+            ]
+        )
+        out = build_venue_summary(comparison, resilience)
+        self.assertIn("mean_delta_large_norm", out.columns)
+        self.assertIn("mean_delta_large_excess_bps", out.columns)
+        self.assertIn("n_indeterminate_norm", out.columns)
+        self.assertNotIn("usdc_preferred_count", out.columns)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 import glob
 from pathlib import Path
+import re
 from typing import Iterable, Mapping, Sequence
+import warnings
 from zipfile import ZipFile
 
 import numpy as np
@@ -24,8 +26,12 @@ VOLUME_CANDIDATES = ("volume", "qty", "quantity", "size")
 class IngestConfig:
     resample_rule: str = "1min"
     ffill_limit: int = 2
-    glitch_sigma_threshold: float = 20.0
+    glitch_sigma_threshold: float = 12.0
     keep_duplicate: str = "last"
+    enable_single_bar_spike_filter: bool = True
+    single_bar_spike_jump_log: float = 0.015
+    single_bar_spike_reversion_log: float = 0.003
+    single_bar_spike_counterpart_max_log: float = 0.002
 
 
 def _pick_existing(candidates: Sequence[str], columns: Sequence[str]) -> str | None:
@@ -133,6 +139,116 @@ def _remove_glitches(frame: pd.DataFrame, sigma_threshold: float) -> pd.DataFram
     return local.loc[keep]
 
 
+def _normalize_symbol(symbol: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(symbol).upper())
+
+
+def _split_symbol(symbol: str) -> tuple[str, str, str] | None:
+    normalized = _normalize_symbol(symbol)
+    for stable in ("USDC", "USDT"):
+        idx = normalized.find(stable)
+        if idx > 0:
+            root = normalized[:idx]
+            suffix = normalized[idx + len(stable) :]
+            return root, stable, suffix
+    return None
+
+
+def _infer_stablecoin_pairs(columns: Sequence[str]) -> list[tuple[str, str]]:
+    buckets: dict[tuple[str, str], dict[str, str]] = {}
+    for symbol in columns:
+        parsed = _split_symbol(symbol)
+        if parsed is None:
+            continue
+        root, quote, suffix = parsed
+        buckets.setdefault((root, suffix), {})[quote] = symbol
+
+    pairs: list[tuple[str, str]] = []
+    for _, mapping in sorted(buckets.items()):
+        if "USDC" in mapping and "USDT" in mapping:
+            pairs.append((mapping["USDC"], mapping["USDT"]))
+    return pairs
+
+
+def sanitize_single_bar_spikes(
+    price_matrix: pd.DataFrame,
+    *,
+    jump_threshold_log: float = 0.015,
+    reversion_tolerance_log: float = 0.003,
+    counterpart_max_move_log: float = 0.002,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if price_matrix.empty:
+        return price_matrix.copy(), pd.DataFrame()
+
+    cleaned = price_matrix.copy()
+    source = price_matrix.copy()
+    flags: list[dict[str, object]] = []
+
+    for usdc_symbol, usdt_symbol in _infer_stablecoin_pairs(list(source.columns)):
+        usdc = pd.to_numeric(source[usdc_symbol], errors="coerce").clip(lower=1e-12)
+        usdt = pd.to_numeric(source[usdt_symbol], errors="coerce").clip(lower=1e-12)
+        ret_usdc = np.log(usdc).diff()
+        ret_usdt = np.log(usdt).diff()
+        spread = np.log(usdc) - np.log(usdt)
+        spread_ret = spread.diff()
+        next_spread = spread_ret.shift(-1)
+        next_usdc = ret_usdc.shift(-1)
+        next_usdt = ret_usdt.shift(-1)
+
+        spread_spike = (
+            spread_ret.abs().ge(jump_threshold_log)
+            & (spread_ret.mul(next_spread).lt(0))
+            & spread_ret.add(next_spread).abs().le(reversion_tolerance_log)
+        )
+        usdc_spike = (
+            spread_spike
+            & ret_usdc.abs().ge(jump_threshold_log)
+            & ret_usdt.abs().le(counterpart_max_move_log)
+        ).fillna(False)
+        usdt_spike = (
+            spread_spike
+            & ret_usdt.abs().ge(jump_threshold_log)
+            & ret_usdc.abs().le(counterpart_max_move_log)
+        ).fillna(False)
+
+        usdc_idx = cleaned.index[usdc_spike]
+        usdt_idx = cleaned.index[usdt_spike]
+        if len(usdc_idx) > 0:
+            cleaned.loc[usdc_idx, usdc_symbol] = cleaned[usdc_symbol].shift(1).loc[usdc_idx]
+        if len(usdt_idx) > 0:
+            cleaned.loc[usdt_idx, usdt_symbol] = cleaned[usdt_symbol].shift(1).loc[usdt_idx]
+
+        for ts in usdc_idx:
+            flags.append(
+                {
+                    "timestamp_utc": ts,
+                    "symbol": usdc_symbol,
+                    "counterpart_symbol": usdt_symbol,
+                    "ret_log": float(ret_usdc.loc[ts]),
+                    "next_ret_log": float(next_usdc.loc[ts]),
+                    "counterpart_ret_log": float(ret_usdt.loc[ts]),
+                    "action": "replace_with_prev",
+                }
+            )
+        for ts in usdt_idx:
+            flags.append(
+                {
+                    "timestamp_utc": ts,
+                    "symbol": usdt_symbol,
+                    "counterpart_symbol": usdc_symbol,
+                    "ret_log": float(ret_usdt.loc[ts]),
+                    "next_ret_log": float(next_usdt.loc[ts]),
+                    "counterpart_ret_log": float(ret_usdc.loc[ts]),
+                    "action": "replace_with_prev",
+                }
+            )
+
+    if not flags:
+        return cleaned, pd.DataFrame()
+    diagnostics = pd.DataFrame(flags).sort_values(["timestamp_utc", "symbol"]).reset_index(drop=True)
+    return cleaned, diagnostics
+
+
 def clean_market_table(raw: pd.DataFrame, cfg: IngestConfig) -> pd.DataFrame:
     missing = [col for col in REQUIRED_COLUMNS if col not in raw.columns]
     if missing:
@@ -191,6 +307,18 @@ def build_processed_prices(raw: pd.DataFrame, cfg: IngestConfig) -> tuple[pd.Dat
     clean = clean_market_table(raw, cfg)
     resampled = resample_market_table(clean, cfg)
     matrix = to_price_matrix(resampled)
+    if cfg.enable_single_bar_spike_filter:
+        matrix, diagnostics = sanitize_single_bar_spikes(
+            matrix,
+            jump_threshold_log=cfg.single_bar_spike_jump_log,
+            reversion_tolerance_log=cfg.single_bar_spike_reversion_log,
+            counterpart_max_move_log=cfg.single_bar_spike_counterpart_max_log,
+        )
+        if not diagnostics.empty:
+            warnings.warn(
+                f"Corrected {diagnostics.shape[0]} single-bar stablecoin spike points in price matrix.",
+                stacklevel=2,
+            )
     return resampled, matrix
 
 
@@ -303,8 +431,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--glitch-sigma-threshold",
         type=float,
-        default=20.0,
+        default=12.0,
         help="Outlier returns threshold in sigma units.",
+    )
+    parser.add_argument(
+        "--disable-single-bar-spike-filter",
+        action="store_true",
+        help="Disable one-bar spike/reversion correction on USDC/USDT matched pairs.",
+    )
+    parser.add_argument(
+        "--single-bar-spike-jump-log",
+        type=float,
+        default=0.015,
+        help="Jump threshold in log-return for one-bar spike detection.",
+    )
+    parser.add_argument(
+        "--single-bar-spike-reversion-log",
+        type=float,
+        default=0.003,
+        help="Reversion tolerance on consecutive log returns for one-bar spike detection.",
+    )
+    parser.add_argument(
+        "--single-bar-spike-counterpart-max-log",
+        type=float,
+        default=0.002,
+        help="Max counterpart log-return to classify one-leg jumps as stale spikes.",
     )
     parser.add_argument(
         "--column-map",
@@ -322,6 +473,10 @@ def main() -> None:
         resample_rule=args.resample_rule,
         ffill_limit=args.ffill_limit,
         glitch_sigma_threshold=args.glitch_sigma_threshold,
+        enable_single_bar_spike_filter=not bool(args.disable_single_bar_spike_filter),
+        single_bar_spike_jump_log=args.single_bar_spike_jump_log,
+        single_bar_spike_reversion_log=args.single_bar_spike_reversion_log,
+        single_bar_spike_counterpart_max_log=args.single_bar_spike_counterpart_max_log,
     )
     raw = load_market_files(files, column_map=column_map)
     resampled, matrix = build_processed_prices(raw, cfg)
