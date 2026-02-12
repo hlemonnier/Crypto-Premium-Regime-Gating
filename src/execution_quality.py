@@ -11,7 +11,15 @@ import pandas as pd
 from src.data_ingest import parse_timestamp_utc
 
 
+# L2-ready execution scope (recommended default for execution-quality conclusions).
 DEFAULT_EPISODES = [
+    "march_vol_2024_binance",
+    "yen_unwind_2024_binance",
+    "yen_followthrough_2024_binance",
+]
+
+# Broader premium/regime study scope (not all episodes have public historical L2).
+PREMIUM_REGIME_EPISODES = [
     "bybit_usdc_depeg_2023",
     "okx_usdc_depeg_2023",
     "march_vol_2024_binance",

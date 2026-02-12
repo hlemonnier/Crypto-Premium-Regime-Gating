@@ -88,21 +88,16 @@ Robust aggregate exclusion map is exported to: `reports/final/final_robust_filte
 
 ```text
                        episode  l2_orderbook_available  tick_trades_available  l2_ready                                                 l2_root
-         bybit_usdc_depeg_2023                   False                  False     False          data/processed/orderbook/bybit_usdc_depeg_2023
         march_vol_2024_binance                    True                   True      True         data/processed/orderbook/march_vol_2024_binance
-           okx_usdc_depeg_2023                   False                   True     False            data/processed/orderbook/okx_usdc_depeg_2023
 yen_followthrough_2024_binance                    True                   True      True data/processed/orderbook/yen_followthrough_2024_binance
        yen_unwind_2024_binance                    True                   True      True        data/processed/orderbook/yen_unwind_2024_binance
 ```
-L2 coverage is incomplete for at least one episode. Execution tables below are lightweight proxies and should be treated as descriptive.
 
 ## Execution Proxy Snapshot (Bar-Level)
 
 ```text
   venue market_type  n_root_episode_pairs  mean_delta_large_raw_bps  median_delta_large_raw_bps  mean_delta_large_excess_bps  median_delta_large_excess_bps  mean_delta_large_norm  median_delta_large_norm  n_indeterminate_norm  median_recovery_bars_usdc  median_recovery_bars_usdt  mean_unrecovered_ratio_usdc  mean_unrecovered_ratio_usdt
 binance derivatives                     3                 -0.972122                   -0.931979                    -0.595878                      -0.520973              -0.034535                -0.047318                     2                        4.0                        4.5                          0.0                     0.002874
-  bybit        spot                     3                  1.022176                    0.781291                     1.446459                       1.102216               1.025324                 0.050954                     0                        3.0                        3.5                          0.0                     0.000559
-    okx derivatives                     2                 -3.330216                   -3.330216                    -1.619332                      -1.619332               0.699729                 0.699729                     1                        2.0                        4.0                          0.0                     0.000000
 ```
 
 Interpretation: compare raw, excess, and normalized deltas jointly. A negative delta means lower proxy impact in USDC quotes versus USDT for the same root/venue.

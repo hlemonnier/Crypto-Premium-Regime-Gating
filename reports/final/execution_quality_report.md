@@ -2,24 +2,16 @@
 
 This report extends stablecoin analysis with bar-level execution proxies.
 
-Partial-L2 mode: only episodes with both orderbook+tick coverage were included because `--strict-l2-required` was set.
-
 ## Scope
 
 - `march_vol_2024_binance`
 - `yen_unwind_2024_binance`
 - `yen_followthrough_2024_binance`
 
-Skipped due to missing L2 coverage:
-- `bybit_usdc_depeg_2023`
-- `okx_usdc_depeg_2023`
-
 ## L2 Coverage
 
 ```text
                        episode  l2_orderbook_available  tick_trades_available  l2_ready                                                 l2_root
-         bybit_usdc_depeg_2023                   False                   True     False          data/processed/orderbook/bybit_usdc_depeg_2023
-           okx_usdc_depeg_2023                   False                   True     False            data/processed/orderbook/okx_usdc_depeg_2023
         march_vol_2024_binance                    True                   True      True         data/processed/orderbook/march_vol_2024_binance
        yen_unwind_2024_binance                    True                   True      True        data/processed/orderbook/yen_unwind_2024_binance
 yen_followthrough_2024_binance                    True                   True      True data/processed/orderbook/yen_followthrough_2024_binance

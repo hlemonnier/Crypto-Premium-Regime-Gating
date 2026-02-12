@@ -299,13 +299,25 @@ Proxy availability note:
 ## Execution quality diagnostics (slippage proxy + resilience)
 
 Bootstrap publicly available execution datasets (orderbook/trades where available) into
-`data/processed/orderbook/<episode>/...`:
+`data/processed/orderbook/<episode>/...`.
+
+Recommended execution-L2 scope (default):
 
 ```bash
 python -m src.execution_data \
-  --episodes bybit_usdc_depeg_2023 okx_usdc_depeg_2023 march_vol_2024_binance yen_unwind_2024_binance yen_followthrough_2024_binance \
   --skip-existing \
   --include-agg-trades
+```
+
+This default targets only L2-ready execution windows (`*2024_binance`) so execution conclusions
+are not blocked by missing 2023 public L2 data.
+
+If you still want to bootstrap 2023 premium/regime episodes for non-L2 analysis:
+
+```bash
+python -m src.execution_data \
+  --episodes bybit_usdc_depeg_2023 okx_usdc_depeg_2023 \
+  --skip-existing
 ```
 
 Optional for manual portal exports (Bybit/OKX historical pages): provide a CSV with direct URLs:
@@ -317,7 +329,7 @@ python -m src.execution_data \
   --skip-existing
 ```
 
-`src.execution_data` now also attempts OKX public `priapi` orderbook discovery (module `4`, 400-level L2) by default.
+`src.execution_data` also attempts OKX public `priapi` orderbook discovery (module `4`, 400-level L2) by default.
 Disable it with `--disable-okx-priapi-orderbook`.
 
 Build execution diagnostics from `prices_resampled.csv` (price + volume bars):
@@ -475,11 +487,22 @@ Backtest execution policy (default):
 
 ## Episodes currently generated in this repository
 
+Premium/regime scope (all generated episodes):
+
 - `bybit_usdc_depeg_2023` (Bybit spot, 2023-03-10 to 2023-03-11)
 - `okx_usdc_depeg_2023` (OKX futures, 2023-03-10 to 2023-03-11)
 - `march_vol_2024_binance` (Binance futures, 2024-03-12 to 2024-03-13)
 - `yen_unwind_2024_binance` (Binance futures, 2024-08-05 to 2024-08-06)
 - `yen_followthrough_2024_binance` (Binance futures, 2024-08-07 to 2024-08-08)
+
+Execution-L2 default scope (for execution-quality conclusions):
+
+- `march_vol_2024_binance`
+- `yen_unwind_2024_binance`
+- `yen_followthrough_2024_binance`
+
+The 2023 Bybit/OKX episodes are kept for premium/regime analysis but excluded from default execution-L2 conclusions due to missing public historical L2 coverage in that window.
+
 - `smoke_2024_08_05` (short smoke-run artifact)
 
 Reference episodes from the Notice spec (LUNA/UST, FTX) are part of the target checklist but are not included in the current generated artifact set.
