@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
@@ -18,8 +19,9 @@ from src.execution_quality import (
     build_l2_coverage,
     build_venue_summary,
 )
+from src.hawkes import HawkesConfig, evaluate_hawkes_quality
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
-from src.pipeline import load_price_matrix
+from src.pipeline import load_config, load_price_matrix, run_pipeline
 from src.premium import PremiumConfig, build_premium_frame, compute_depeg_flag
 from src.regimes import build_regime_score
 from src.robust_filter import robust_filter
@@ -356,6 +358,51 @@ class HawkesAdaptiveThresholdTests(unittest.TestCase):
         self.assertTrue(out["hawkes_riskoff_signal"].iloc[7:].any())
 
 
+class HawkesQualityTests(unittest.TestCase):
+    def test_low_variance_single_refit_hawkes_fails_quality_gate(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=100, freq="1min", tz="UTC")
+        hawkes_frame = pd.DataFrame(
+            {
+                "n_t": pd.Series(0.10, index=idx),
+                "hawkes_fit_ok": pd.Series(True, index=idx),
+                "hawkes_refit_count": pd.Series(1.0, index=idx),
+            },
+            index=idx,
+        )
+        passed, reason, metrics = evaluate_hawkes_quality(hawkes_frame, HawkesConfig())
+        self.assertFalse(passed)
+        self.assertIn("insufficient_refits", reason)
+        self.assertIn("low_n_unique", reason)
+        self.assertIn("low_n_variance", reason)
+        self.assertEqual(float(metrics["hawkes_refit_count"]), 1.0)
+
+    def test_pipeline_disables_hawkes_decisions_when_quality_fails(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=600, freq="1min", tz="UTC")
+        base = pd.Series(np.linspace(1.0, 1.02, len(idx)), index=idx)
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": 50000.0 * base,
+                "BTCUSDT-PERP": 50000.0 * (base + 1e-6),
+                "ETHUSDC-PERP": 2500.0 * base,
+                "ETHUSDT-PERP": 2500.0 * (base + 1e-6),
+                "SOLUSDC-PERP": 80.0 * base,
+                "SOLUSDT-PERP": 80.0 * (base + 1e-6),
+                "BNBUSDC-PERP": 400.0 * base,
+                "BNBUSDT-PERP": 400.0 * (base + 1e-6),
+            },
+            index=idx,
+        )
+        config = load_config("configs/config.yaml")
+        run_cfg = deepcopy(config)
+        run_cfg.setdefault("hawkes", {})
+        run_cfg["hawkes"]["enabled"] = True
+        run_cfg["onchain"] = {"enabled": False}
+
+        signal = run_pipeline(run_cfg, matrix)["signal_frame"]
+        self.assertFalse(bool(signal["hawkes_quality_pass"].iloc[0]))
+        self.assertFalse(bool(signal["hawkes_riskoff_signal"].astype(bool).any()))
+
+
 class StrategyFallbackThresholdTests(unittest.TestCase):
     def test_missing_sigma_hat_uses_signal_scale_fallback(self) -> None:
         idx = pd.date_range("2024-01-01", periods=130, freq="1min", tz="UTC")
@@ -410,9 +457,35 @@ class StressSourceDecisionTests(unittest.TestCase):
         self.assertEqual(str(out.loc[idx[0], "stress_source"]), "usdc_depeg_stress")
         self.assertEqual(str(out.loc[idx[1], "stress_source"]), "usdt_backing_concern")
         self.assertEqual(str(out.loc[idx[2], "stress_source"]), "technical_flow_imbalance")
-        self.assertEqual(str(out.loc[idx[0], "decision"]), "Risk-off")
+        self.assertEqual(str(out.loc[idx[0], "decision"]), "Widen")
         self.assertEqual(str(out.loc[idx[1], "decision"]), "Widen")
         self.assertEqual(str(out.loc[idx[2], "decision"]), "Widen")
+
+    def test_depeg_flag_forces_riskoff_for_all_stress_sources(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=3, freq="1min", tz="UTC")
+        m_t = pd.Series([0.05, 0.05, 0.05], index=idx, name="m_t")
+        T_t = pd.Series(1.0, index=idx, name="T_t")
+        chi_t = pd.Series(0.0, index=idx, name="chi_t")
+        sigma_hat = pd.Series(0.01, index=idx, name="sigma_hat")
+        regime = pd.Series(["transient", "transient", "transient"], index=idx, name="regime")
+        depeg_flag = pd.Series([True, True, True], index=idx, name="depeg_flag")
+        stablecoin_proxy = pd.Series([0.003, -0.003, 0.0], index=idx, name="stablecoin_proxy")
+        cfg = StrategyConfig(entry_k=1.0, threshold_min_periods=10_000)
+
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=sigma_hat,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            stablecoin_proxy=stablecoin_proxy,
+            cfg=cfg,
+        )
+
+        self.assertTrue(bool((out["decision"] == "Risk-off").all()))
+        self.assertTrue(bool((out["riskoff_flag"]).all()))
+        self.assertTrue(bool((out["riskoff_reason"] == "depeg_flag").all()))
 
 
 class ConfidenceSizingTests(unittest.TestCase):
@@ -533,6 +606,8 @@ class OnchainColumnsTests(unittest.TestCase):
         self.assertIn("onchain_log_usdt_dev", frame.columns)
         self.assertIn("onchain_source_timestamp_utc", frame.columns)
         self.assertIn("onchain_source_age_hours", frame.columns)
+        self.assertIn("onchain_data_stale", frame.columns)
+        self.assertIn("onchain_depeg_flag_effective", frame.columns)
 
 
 class BybitIntervalTests(unittest.TestCase):
@@ -599,6 +674,34 @@ class OnchainCadenceTests(unittest.TestCase):
             self.assertAlmostEqual(float(frame.loc[ts, "onchain_usdc_price"]), 1.0, places=12)
             self.assertEqual(str(frame.loc[ts, "onchain_source_timestamp_utc"]), "2024-03-12 00:00:00+00:00")
             self.assertGreater(float(frame.loc[ts, "onchain_source_age_hours"]), 24.0)
+
+    def test_onchain_stale_rows_are_marked_unavailable_and_excluded_from_effective_depeg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "onchain.csv"
+            daily = pd.DataFrame(
+                {
+                    "timestamp_utc": ["2024-03-10T00:00:00Z"],
+                    "onchain_usdc_price": [1.0],
+                    "onchain_usdt_price": [1.02],
+                }
+            )
+            daily.to_csv(cache_path, index=False)
+
+            idx = pd.date_range("2024-03-15", periods=12 * 60, freq="1min", tz="UTC")
+            stablecoin_proxy = pd.Series(0.0, index=idx, name="stablecoin_proxy")
+            cfg = OnchainConfig(
+                cache_path=str(cache_path),
+                cache_max_age_hours=24 * 365,
+                intraday_lag_days=0,
+                depeg_delta_log=0.001,
+                depeg_min_consecutive=1,
+                max_source_age_hours=12,
+            )
+            frame = build_onchain_validation_frame(index=idx, stablecoin_proxy=stablecoin_proxy, cfg=cfg)
+
+            self.assertTrue(bool(frame["onchain_data_stale"].astype(bool).all()))
+            self.assertFalse(bool(frame["onchain_data_available"].astype(bool).any()))
+            self.assertFalse(bool(frame["onchain_depeg_flag_effective"].astype(bool).any()))
 
 
 class DepegCadenceTests(unittest.TestCase):
@@ -681,6 +784,29 @@ class StablecoinSpikeSanitizerTests(unittest.TestCase):
 
         pd.testing.assert_frame_equal(cleaned, matrix)
         self.assertTrue(diagnostics.empty)
+
+
+class EpisodeSafetyRegressionTests(unittest.TestCase):
+    def test_depeg_bars_are_always_riskoff_in_march_2023_episodes(self) -> None:
+        config = load_config("configs/config.yaml")
+        episodes = [
+            Path("data/processed/episodes/bybit_usdc_depeg_2023/prices_matrix.csv"),
+            Path("data/processed/episodes/okx_usdc_depeg_2023/prices_matrix.csv"),
+        ]
+        missing = [str(path) for path in episodes if not path.exists()]
+        if missing:
+            self.skipTest(f"Missing bundled episode matrices: {missing}")
+
+        for path in episodes:
+            with self.subTest(episode=path.parent.name):
+                run_cfg = deepcopy(config)
+                run_cfg.setdefault("data", {})
+                run_cfg["data"]["price_matrix_path"] = str(path)
+                signal = run_pipeline(run_cfg, load_price_matrix(path))["signal_frame"]
+                depeg = signal["depeg_flag"].astype(bool)
+                riskoff = signal["decision"].astype(str).eq("Risk-off")
+                self.assertGreater(int(depeg.sum()), 0)
+                self.assertEqual(int((depeg & ~riskoff).sum()), 0)
 
 
 class ExecutionProxyTests(unittest.TestCase):

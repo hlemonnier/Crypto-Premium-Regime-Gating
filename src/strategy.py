@@ -92,7 +92,7 @@ def classify_stress_source(
 ) -> pd.Series:
     idx = regime.index
     source = pd.Series("none", index=idx, name="stress_source", dtype="object")
-    stress_like = regime.eq("stress").fillna(False) | depeg_flag.astype(bool).fillna(False)
+    stress_like = regime.eq("stress").fillna(False) | depeg_flag.fillna(False).astype(bool)
 
     proxy_thr = abs(float(proxy_threshold))
     onchain_thr = abs(float(onchain_threshold))
@@ -177,6 +177,8 @@ def build_decisions(
     n_t: pd.Series | None = None,
     cfg: StrategyConfig,
 ) -> pd.DataFrame:
+    depeg = depeg_flag.fillna(False).astype(bool).rename("depeg_flag")
+
     widen_frame = compute_widen_flag(
         T_t,
         chi_t,
@@ -200,7 +202,7 @@ def build_decisions(
 
     stress_source = classify_stress_source(
         regime=regime,
-        depeg_flag=depeg_flag,
+        depeg_flag=depeg,
         stablecoin_proxy=stablecoin_proxy,
         onchain_proxy=onchain_proxy,
         onchain_usdc_minus_1=onchain_usdc_minus_1,
@@ -212,7 +214,9 @@ def build_decisions(
     usdt_concern = stress_source.eq("usdt_backing_concern")
     technical_flow = stress_source.eq("technical_flow_imbalance")
 
-    riskoff = usdc_stress.copy()
+    riskoff = depeg.copy()
+    riskoff_reason = pd.Series("none", index=m_t.index, name="riskoff_reason", dtype="object")
+    riskoff_reason.loc[depeg] = "depeg_flag"
     hawkes_widen_threshold = pd.Series(np.nan, index=m_t.index, name="hawkes_widen_threshold", dtype="float64")
     hawkes_riskoff_threshold = pd.Series(
         np.nan, index=m_t.index, name="hawkes_riskoff_threshold", dtype="float64"
@@ -259,10 +263,11 @@ def build_decisions(
         hawkes_widen_signal = n_t.ge(hawkes_widen_threshold).fillna(False).rename("hawkes_widen_signal")
         hawkes_riskoff_signal = n_t.ge(hawkes_riskoff_threshold).fillna(False).rename("hawkes_riskoff_signal")
         riskoff = riskoff | hawkes_riskoff_signal
+        riskoff_reason.loc[hawkes_riskoff_signal & ~depeg] = "hawkes_riskoff"
     riskoff = riskoff.fillna(False).rename("riskoff_flag")
     decision.loc[riskoff] = "Risk-off"
 
-    stress_widen = ((usdt_concern | technical_flow) & (~riskoff)).rename("stress_widen_flag")
+    stress_widen = ((usdc_stress | usdt_concern | technical_flow) & (~riskoff)).rename("stress_widen_flag")
     widen = (~riskoff) & (widen_flag | stress_widen | hawkes_widen_signal)
     decision.loc[widen] = "Widen"
 
@@ -301,6 +306,7 @@ def build_decisions(
             hawkes_widen_signal,
             hawkes_riskoff_signal,
             stress_source,
+            riskoff_reason,
             riskoff,
             stress_widen,
             trade_signal.rename("trade_signal"),

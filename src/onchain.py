@@ -21,6 +21,7 @@ class OnchainConfig:
     cache_max_age_hours: int = 24
     request_timeout_sec: int = 40
     intraday_lag_days: int = 1
+    max_source_age_hours: float = 48.0
     depeg_delta_log: float = 0.001
     depeg_min_consecutive: int = 5
     divergence_alert_log: float = 0.001
@@ -38,6 +39,8 @@ ONCHAIN_COLUMNS = [
     "onchain_proxy",
     "onchain_divergence",
     "onchain_depeg_flag",
+    "onchain_depeg_flag_effective",
+    "onchain_data_stale",
     "onchain_divergence_flag",
     "onchain_data_available",
 ]
@@ -56,6 +59,8 @@ def empty_onchain_frame(index: pd.Index) -> pd.DataFrame:
     frame["onchain_proxy"] = np.nan
     frame["onchain_divergence"] = np.nan
     frame["onchain_depeg_flag"] = False
+    frame["onchain_depeg_flag_effective"] = False
+    frame["onchain_data_stale"] = True
     frame["onchain_divergence_flag"] = False
     frame["onchain_data_available"] = False
     return frame
@@ -193,6 +198,10 @@ def build_onchain_validation_frame(
     onchain_depeg_flag = (
         effective_depeg_flag.reindex(index, method="ffill").fillna(False).rename("onchain_depeg_flag")
     )
+    stale_limit = max(0.0, float(cfg.max_source_age_hours))
+    onchain_data_stale = (source_ts.isna() | age_hours.gt(stale_limit)).fillna(True).rename("onchain_data_stale")
+    onchain_data_available = (proxy.notna() & (~onchain_data_stale)).rename("onchain_data_available")
+    onchain_depeg_flag_effective = (onchain_depeg_flag & onchain_data_available).rename("onchain_depeg_flag_effective")
 
     divergence_flag = divergence.abs().ge(cfg.divergence_alert_log).fillna(False).rename("onchain_divergence_flag")
 
@@ -209,8 +218,10 @@ def build_onchain_validation_frame(
             "onchain_proxy": proxy,
             "onchain_divergence": divergence,
             "onchain_depeg_flag": onchain_depeg_flag,
+            "onchain_depeg_flag_effective": onchain_depeg_flag_effective,
+            "onchain_data_stale": onchain_data_stale,
             "onchain_divergence_flag": divergence_flag,
-            "onchain_data_available": proxy.notna(),
+            "onchain_data_available": onchain_data_available,
         },
         index=index,
     )

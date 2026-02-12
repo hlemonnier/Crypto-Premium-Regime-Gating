@@ -244,6 +244,10 @@ Current defaults in `configs/config.yaml` include:
 - `strategy.chi_widen_quantile: 0.99`
 - `strategy.threshold_mode: expanding` (causal quantiles)
 - `strategy.hawkes_threshold_mode: expanding` (causal Hawkes gating when enabled)
+- `hawkes.quality_min_refits: 3`
+- `hawkes.quality_min_unique_n: 5`
+- `hawkes.quality_min_n_std: 0.005`
+- `hawkes.quality_min_fit_ok_ratio: 0.2`
 - `regimes.stress_quantile: 0.95`
 - `regimes.recovery_quantile: 0.6`
 - `regimes.threshold_mode: expanding` (causal quantiles)
@@ -251,6 +255,7 @@ Current defaults in `configs/config.yaml` include:
 - `premium.proxy_method: median` (`pw_rolling` also supported)
 - `premium.pw_window: 12h`
 - `premium.pw_min_period_fraction: 0.5`
+- `onchain.max_source_age_hours: 48`
 
 Reference OOS tuning table:
 
@@ -276,11 +281,13 @@ If you need to reproduce legacy static-threshold behavior, switch both to:
 - `onchain_proxy`
 - `onchain_divergence`
 - `onchain_depeg_flag`
+- `onchain_depeg_flag_effective`
+- `onchain_data_stale`
 
 `depeg_flag` used by strategy is now the safety union:
 
-- market-implied depeg flag from premium proxy
-- on-chain depeg flag from DefiLlama prices
+- `market_depeg_flag` from premium proxy
+- freshness-gated `onchain_depeg_flag_effective`
 
 Configuration lives under `onchain:` in `configs/config.yaml`.
 
@@ -289,6 +296,7 @@ Sampling/cadence note:
 - DefiLlama stablecoin prices are daily.
 - `onchain_depeg_flag` persistence is therefore computed on the native daily cadence before alignment to intraday bars.
 - current defaults are tuned for daily feed semantics (`onchain.depeg_delta_log: 0.005`, `onchain.depeg_min_consecutive: 1`).
+- on-chain values are marked stale when `onchain_source_age_hours > onchain.max_source_age_hours`; stale rows are excluded from effective depeg safety union.
 
 Proxy availability note:
 
@@ -443,6 +451,7 @@ Main final artifacts:
 - `reports/tables/trade_log_gated.csv`
 - `reports/tables/trade_log_naive.csv`
 - `reports/tables/signal_frame.parquet`
+- `reports/tables/safety_diagnostics.csv`
 - `reports/figures/figure_1_timeline.png`
 - `reports/figures/figure_2_panel.png`
 - `reports/figures/figure_3_phase_space.png`
@@ -457,21 +466,25 @@ Metric convention in `metrics.csv`:
 
 Priority order:
 
-1. Stress source classification:
+1. Hard safety override:
+   - if `depeg_flag` is true, decision is `Risk-off` (unconditional)
+2. Stress source classification (diagnostic + widening policy):
    - `usdc_depeg_stress`
    - `usdt_backing_concern`
    - `technical_flow_imbalance`
-2. Source-aware response:
-   - `usdc_depeg_stress` => `Risk-off`
+3. Source-aware response when not in hard safety override:
+   - `usdc_depeg_stress` => at least `Widen` (hard `Risk-off` is already enforced by `depeg_flag`)
    - `usdt_backing_concern` => `Widen`
    - `technical_flow_imbalance` => at least `Widen` in stress windows
-3. Hawkes enabled:
+4. Hawkes (guarded optional):
+   - Hawkes gates are applied only when quality checks pass (`refit_count`, `fit_ok_ratio`, `n_t` uniqueness/variance).
    - fixed mode (`strategy.hawkes_threshold_mode: fixed`): `n(t) > 0.85` => `Risk-off`, `n(t) > 0.70` => `Widen`
    - adaptive mode (`strategy.hawkes_threshold_mode: expanding|rolling`): causal quantile thresholds from `n(t)` history
-4. Else transient mode:
+   - when quality fails, Hawkes gating is disabled for decisions and reason is written to `hawkes_quality_reason`
+5. Else transient mode:
    - `Trade` only if `|m_t| > k * T_t * sigma_hat` (unit-consistent implementation)
    - `Widen` when high `T_t` or `chi_t`
-5. Confidence-based sizing on top of discrete decisions:
+6. Confidence-based sizing on top of discrete decisions:
    - `confidence_score` in `[0, 1]` combines distance-to-threshold with penalties from outlier events and stress context
    - `position_size = confidence_score` on `Trade`, `0` otherwise
 

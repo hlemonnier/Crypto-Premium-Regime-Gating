@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from src.backtest import BacktestConfig, run_backtest, run_naive_baseline
-from src.hawkes import HawkesConfig, estimate_hawkes_rolling
+from src.hawkes import HawkesConfig, estimate_hawkes_rolling, evaluate_hawkes_quality
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.pipeline import load_config, load_price_matrix
 from src.premium import PremiumConfig, build_premium_frame
@@ -66,9 +66,14 @@ def _compute_core_frames(config: dict[str, Any], matrix: pd.DataFrame) -> dict[s
             onchain_frame = empty_onchain_frame(premium_frame.index)
     else:
         onchain_frame = empty_onchain_frame(premium_frame.index)
-    premium_frame["depeg_flag"] = (
-        premium_frame["depeg_flag"].astype(bool) | onchain_frame["onchain_depeg_flag"].astype(bool)
+    market_depeg_flag = premium_frame["depeg_flag"].fillna(False).astype(bool).rename("market_depeg_flag")
+    premium_frame["market_depeg_flag"] = market_depeg_flag
+    onchain_effective = onchain_frame.get(
+        "onchain_depeg_flag_effective",
+        pd.Series(False, index=premium_frame.index, name="onchain_depeg_flag_effective"),
     )
+    onchain_effective = onchain_effective.fillna(False).astype(bool)
+    premium_frame["depeg_flag"] = (market_depeg_flag | onchain_effective).rename("depeg_flag")
 
     robust_cfg = _build_dataclass(RobustFilterConfig, config.get("robust_filter"))
     robust_frame = build_robust_frame(premium_frame["p"], cfg=robust_cfg, freq=freq)
@@ -237,6 +242,7 @@ def _run_ablation_once(
         hawkes_cfg = _build_dataclass(HawkesConfig, config.get("hawkes"))
         hawkes_cfg = replace(hawkes_cfg, enabled=True)
         hawkes_frame = estimate_hawkes_rolling(robust_frame["event"], hawkes_cfg)
+        hawkes_quality_pass, _, _ = evaluate_hawkes_quality(hawkes_frame, hawkes_cfg)
         hawkes_decision_frame = build_decisions(
             m_t=m_t,
             T_t=state_frame["T_t"],
@@ -249,7 +255,7 @@ def _run_ablation_once(
             onchain_proxy=onchain_frame.get("onchain_proxy"),
             onchain_usdc_minus_1=onchain_frame.get("onchain_usdc_minus_1"),
             onchain_usdt_minus_1=onchain_frame.get("onchain_usdt_minus_1"),
-            n_t=hawkes_frame["n_t"] if "n_t" in hawkes_frame else None,
+            n_t=hawkes_frame["n_t"] if (hawkes_quality_pass and "n_t" in hawkes_frame) else None,
             cfg=strategy_cfg,
         )
         hawkes_log, hawkes_metrics = run_backtest(

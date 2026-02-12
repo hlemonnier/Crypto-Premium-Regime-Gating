@@ -19,6 +19,10 @@ class HawkesConfig:
     auto_min_warmup: str = "4h"
     auto_adjust_min_events: bool = True
     auto_min_events_floor: int = 5
+    quality_min_refits: int = 3
+    quality_min_unique_n: int = 5
+    quality_min_n_std: float = 0.005
+    quality_min_fit_ok_ratio: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,7 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
     alpha_t = pd.Series(np.nan, index=index, name="alpha_t")
     beta_t = pd.Series(np.nan, index=index, name="beta_t")
     fit_ok = pd.Series(False, index=index, name="hawkes_fit_ok")
+    refit_count_t = pd.Series(np.nan, index=index, name="hawkes_refit_count")
 
     start_time = index[0]
     effective_min_events = max(2, int(cfg.min_events_for_fit))
@@ -171,6 +176,7 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
 
     params: HawkesParams | None = None
     last_refit: pd.Timestamp | None = None
+    refit_count = 0
 
     event_index = event_series[event_series].index
     for ts in index:
@@ -191,6 +197,7 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
                 if fitted is not None:
                     params = fitted
                     last_refit = ts
+                    refit_count += 1
 
         if params is None:
             continue
@@ -210,5 +217,52 @@ def estimate_hawkes_rolling(events: pd.Series, cfg: HawkesConfig) -> pd.DataFram
         alpha_t.loc[ts] = params.alpha
         beta_t.loc[ts] = params.beta
         fit_ok.loc[ts] = True
+        refit_count_t.loc[ts] = float(refit_count)
 
-    return pd.concat([lambda_t, n_t, mu_t, alpha_t, beta_t, fit_ok], axis=1)
+    return pd.concat([lambda_t, n_t, mu_t, alpha_t, beta_t, fit_ok, refit_count_t], axis=1)
+
+
+def evaluate_hawkes_quality(
+    hawkes_frame: pd.DataFrame,
+    cfg: HawkesConfig,
+) -> tuple[bool, str, dict[str, float]]:
+    if hawkes_frame.empty:
+        metrics = {
+            "hawkes_refit_count": 0.0,
+            "hawkes_fit_ok_ratio": 0.0,
+            "hawkes_n_unique": 0.0,
+            "hawkes_n_std": 0.0,
+        }
+        return False, "empty_hawkes_frame", metrics
+
+    fit_ok = hawkes_frame.get("hawkes_fit_ok", pd.Series(False, index=hawkes_frame.index)).fillna(False).astype(bool)
+    n_raw = hawkes_frame.get("n_t", pd.Series(np.nan, index=hawkes_frame.index))
+    n_t = pd.to_numeric(n_raw, errors="coerce")
+    refit_raw = hawkes_frame.get("hawkes_refit_count", pd.Series(np.nan, index=hawkes_frame.index))
+    refit_count_series = pd.to_numeric(refit_raw, errors="coerce")
+
+    refit_count = float(refit_count_series.max(skipna=True)) if refit_count_series.notna().any() else 0.0
+    fit_ok_ratio = float(fit_ok.mean()) if len(fit_ok) > 0 else 0.0
+    n_unique = float(n_t.dropna().round(12).nunique())
+    n_std = float(n_t.dropna().std(ddof=0)) if n_t.notna().any() else 0.0
+
+    metrics = {
+        "hawkes_refit_count": refit_count,
+        "hawkes_fit_ok_ratio": fit_ok_ratio,
+        "hawkes_n_unique": n_unique,
+        "hawkes_n_std": n_std,
+    }
+
+    failures: list[str] = []
+    if refit_count < float(cfg.quality_min_refits):
+        failures.append("insufficient_refits")
+    if fit_ok_ratio < float(cfg.quality_min_fit_ok_ratio):
+        failures.append("low_fit_ok_ratio")
+    if n_unique < float(cfg.quality_min_unique_n):
+        failures.append("low_n_unique")
+    if n_std < float(cfg.quality_min_n_std):
+        failures.append("low_n_variance")
+
+    if failures:
+        return False, ",".join(failures), metrics
+    return True, "ok", metrics

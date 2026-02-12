@@ -46,6 +46,7 @@ onchain:
   cache_max_age_hours: 24
   request_timeout_sec: 40
   intraday_lag_days: 1
+  max_source_age_hours: 48
   depeg_delta_log: 0.005
   depeg_min_consecutive: 1
   divergence_alert_log: 0.001
@@ -85,6 +86,10 @@ hawkes:
   auto_min_warmup: 4h
   auto_adjust_min_events: true
   auto_min_events_floor: 5
+  quality_min_refits: 3
+  quality_min_unique_n: 5
+  quality_min_n_std: 0.005
+  quality_min_fit_ok_ratio: 0.2
 strategy:
   entry_k: 1.0
   t_widen_quantile: 0.97

@@ -23,6 +23,13 @@ DECISION_COLORS = {
 }
 
 
+def _hawkes_quality_pass(frame: pd.DataFrame) -> bool:
+    if "hawkes_quality_pass" not in frame.columns:
+        return False
+    quality = frame["hawkes_quality_pass"].fillna(False).astype(bool)
+    return bool(quality.any())
+
+
 def plot_figure_1_timeline(frame: pd.DataFrame, output_path: str | Path, cfg: PlotConfig) -> Path:
     required = {"p_naive", "p_smooth", "regime", "event"}
     missing = required.difference(frame.columns)
@@ -70,10 +77,27 @@ def plot_figure_2_panel(frame: pd.DataFrame, output_path: str | Path, cfg: PlotC
 
     fig, ax = plt.subplots(figsize=cfg.figsize_panel, dpi=cfg.dpi)
     x = frame.index
-    if "n_t" in frame.columns and frame["n_t"].notna().any():
+    hawkes_mode = _hawkes_quality_pass(frame) and "n_t" in frame.columns and frame["n_t"].notna().any()
+    if hawkes_mode:
         ax.plot(x, frame["n_t"], color="#003f5c", label="n(t)")
-        ax.axhline(0.70, color="#ff7f0e", linestyle="--", linewidth=1.2, label="Widen threshold")
-        ax.axhline(0.85, color="#d62728", linestyle="--", linewidth=1.2, label="Risk-off threshold")
+        widen_thr = (
+            pd.to_numeric(frame.get("hawkes_widen_threshold"), errors="coerce")
+            if "hawkes_widen_threshold" in frame.columns
+            else None
+        )
+        risk_thr = (
+            pd.to_numeric(frame.get("hawkes_riskoff_threshold"), errors="coerce")
+            if "hawkes_riskoff_threshold" in frame.columns
+            else None
+        )
+        if widen_thr is not None and widen_thr.notna().any():
+            ax.plot(x, widen_thr, color="#ff7f0e", linestyle="--", linewidth=1.2, label="Widen threshold")
+        else:
+            ax.axhline(0.70, color="#ff7f0e", linestyle="--", linewidth=1.2, label="Widen threshold")
+        if risk_thr is not None and risk_thr.notna().any():
+            ax.plot(x, risk_thr, color="#d62728", linestyle="--", linewidth=1.2, label="Risk-off threshold")
+        else:
+            ax.axhline(0.85, color="#d62728", linestyle="--", linewidth=1.2, label="Risk-off threshold")
         ax.set_ylabel("branching ratio n(t)")
         ax.set_title("Figure 2 - Hawkes Branching Ratio")
     else:
@@ -93,7 +117,7 @@ def plot_figure_2_panel(frame: pd.DataFrame, output_path: str | Path, cfg: PlotC
 
     ax.grid(alpha=0.2)
     ax.set_xlabel("timestamp_utc")
-    if "n_t" in frame.columns and frame["n_t"].notna().any():
+    if hawkes_mode:
         ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(out)
@@ -117,13 +141,45 @@ def plot_figure_3_phase_space(
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=cfg.figsize_phase, dpi=cfg.dpi)
 
-    hawkes_mode = "n_t" in frame.columns and frame["n_t"].notna().any()
+    hawkes_mode = _hawkes_quality_pass(frame) and "n_t" in frame.columns and frame["n_t"].notna().any()
     if hawkes_mode:
         y_col = "n_t"
         ax.set_ylabel("n_t")
         ax.set_title("Figure 3 - Phase Space (T_t, n_t)")
-        ax.axhline(0.70, color="#ff7f0e", linestyle="--", linewidth=1.0, alpha=0.8)
-        ax.axhline(0.85, color="#d62728", linestyle="--", linewidth=1.0, alpha=0.8)
+        widen_thr = (
+            pd.to_numeric(frame.get("hawkes_widen_threshold"), errors="coerce")
+            if "hawkes_widen_threshold" in frame.columns
+            else None
+        )
+        risk_thr = (
+            pd.to_numeric(frame.get("hawkes_riskoff_threshold"), errors="coerce")
+            if "hawkes_riskoff_threshold" in frame.columns
+            else None
+        )
+        if widen_thr is not None and widen_thr.notna().any():
+            ax.plot(
+                frame["T_t"],
+                widen_thr,
+                color="#ff7f0e",
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.8,
+                label="Widen threshold",
+            )
+        else:
+            ax.axhline(0.70, color="#ff7f0e", linestyle="--", linewidth=1.0, alpha=0.8)
+        if risk_thr is not None and risk_thr.notna().any():
+            ax.plot(
+                frame["T_t"],
+                risk_thr,
+                color="#d62728",
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.8,
+                label="Risk-off threshold",
+            )
+        else:
+            ax.axhline(0.85, color="#d62728", linestyle="--", linewidth=1.0, alpha=0.8)
     else:
         if "m_t" not in frame.columns:
             raise KeyError("Figure 3 baseline requires m_t when Hawkes is not used.")

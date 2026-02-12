@@ -11,7 +11,7 @@ import yaml
 
 from src.backtest import BacktestConfig, compare_strategies, export_metrics
 from src.data_ingest import parse_timestamp_utc, sanitize_single_bar_spikes
-from src.hawkes import HawkesConfig, estimate_hawkes_rolling
+from src.hawkes import HawkesConfig, estimate_hawkes_rolling, evaluate_hawkes_quality
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.plots import (
     PlotConfig,
@@ -137,10 +137,14 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     else:
         onchain_frame = empty_onchain_frame(premium_frame.index)
 
-    # Safety override integrates both market-implied and on-chain depeg detection.
-    premium_frame["depeg_flag"] = (
-        premium_frame["depeg_flag"].astype(bool) | onchain_frame["onchain_depeg_flag"].astype(bool)
+    market_depeg_flag = premium_frame["depeg_flag"].fillna(False).astype(bool).rename("market_depeg_flag")
+    premium_frame["market_depeg_flag"] = market_depeg_flag
+    onchain_effective = onchain_frame.get(
+        "onchain_depeg_flag_effective",
+        pd.Series(False, index=premium_frame.index, name="onchain_depeg_flag_effective"),
     )
+    onchain_effective = onchain_effective.fillna(False).astype(bool).rename("onchain_depeg_flag_effective")
+    premium_frame["depeg_flag"] = (market_depeg_flag | onchain_effective).rename("depeg_flag")
 
     robust_cfg = _build_dataclass(RobustFilterConfig, config.get("robust_filter"))
     robust_frame = build_robust_frame(premium_frame["p"], cfg=robust_cfg, freq=freq)
@@ -158,12 +162,29 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     regime_frame = build_regime_frame(state_frame, regime_cfg)
 
     hawkes_cfg = _build_dataclass(HawkesConfig, config.get("hawkes"))
-    hawkes_frame = (
-        estimate_hawkes_rolling(robust_frame["event"], hawkes_cfg)
-        if hawkes_cfg.enabled
-        else pd.DataFrame(index=premium_frame.index)
-    )
-    n_t = hawkes_frame["n_t"] if "n_t" in hawkes_frame.columns else None
+    if hawkes_cfg.enabled:
+        hawkes_frame = estimate_hawkes_rolling(robust_frame["event"], hawkes_cfg)
+        hawkes_quality_pass, hawkes_quality_reason, hawkes_quality_metrics = evaluate_hawkes_quality(
+            hawkes_frame,
+            hawkes_cfg,
+        )
+    else:
+        hawkes_frame = pd.DataFrame(index=premium_frame.index)
+        hawkes_quality_pass = False
+        hawkes_quality_reason = "disabled"
+        hawkes_quality_metrics = {
+            "hawkes_refit_count": 0.0,
+            "hawkes_fit_ok_ratio": 0.0,
+            "hawkes_n_unique": 0.0,
+            "hawkes_n_std": 0.0,
+        }
+
+    n_t = hawkes_frame["n_t"] if (hawkes_quality_pass and "n_t" in hawkes_frame.columns) else None
+    hawkes_diag_frame = pd.DataFrame(index=premium_frame.index)
+    hawkes_diag_frame["hawkes_quality_pass"] = bool(hawkes_quality_pass)
+    hawkes_diag_frame["hawkes_quality_reason"] = str(hawkes_quality_reason)
+    for key, value in hawkes_quality_metrics.items():
+        hawkes_diag_frame[key] = float(value)
 
     strategy_cfg = _build_dataclass(StrategyConfig, config.get("strategy"))
     decision_frame = build_decisions(
@@ -183,7 +204,17 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     )
 
     signal_frame = pd.concat(
-        [premium_frame, onchain_frame, robust_frame, m_t, state_frame, regime_frame, hawkes_frame, decision_frame],
+        [
+            premium_frame,
+            onchain_frame,
+            robust_frame,
+            m_t,
+            state_frame,
+            regime_frame,
+            hawkes_frame,
+            hawkes_diag_frame,
+            decision_frame,
+        ],
         axis=1,
     )
     signal_frame = signal_frame.loc[~signal_frame.index.duplicated(keep="last")]
@@ -224,11 +255,32 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     naive_path = tables_dir / "trade_log_naive.csv"
     signal_path = tables_dir / "signal_frame.parquet"
     proxy_path = tables_dir / "stablecoin_proxy_components.parquet"
+    safety_diag_path = tables_dir / "safety_diagnostics.csv"
 
     results["gated_log"].to_csv(gated_path, index=True)
     results["naive_log"].to_csv(naive_path, index=True)
     signal_path = _save_frame(signal_frame, signal_path)
     proxy_path = _save_frame(results["proxy_components"], proxy_path)
+    depeg_flag = signal_frame.get("depeg_flag", pd.Series(False, index=signal_frame.index)).astype(bool)
+    riskoff_flag = signal_frame.get("riskoff_flag", pd.Series(False, index=signal_frame.index)).astype(bool)
+    onchain_stale = signal_frame.get("onchain_data_stale", pd.Series(False, index=signal_frame.index)).astype(bool)
+    safety_diag = pd.DataFrame(
+        [
+            {
+                "depeg_bars": int(depeg_flag.sum()),
+                "riskoff_bars": int(riskoff_flag.sum()),
+                "depeg_without_riskoff_bars": int((depeg_flag & ~riskoff_flag).sum()),
+                "hawkes_quality_pass": bool(signal_frame.get("hawkes_quality_pass", pd.Series(False)).iloc[0])
+                if not signal_frame.empty
+                else False,
+                "hawkes_quality_reason": str(signal_frame.get("hawkes_quality_reason", pd.Series(["n/a"])).iloc[0])
+                if not signal_frame.empty
+                else "n/a",
+                "onchain_stale_ratio": float(onchain_stale.mean()) if len(onchain_stale) > 0 else 0.0,
+            }
+        ]
+    )
+    safety_diag.to_csv(safety_diag_path, index=False)
 
     plot_cfg = _build_dataclass(PlotConfig, config.get("plots"))
     fig1 = plot_figure_1_timeline(
@@ -254,6 +306,7 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
         "trade_log_naive": naive_path,
         "signal_frame": signal_path,
         "proxy_components": proxy_path,
+        "safety_diagnostics": safety_diag_path,
         "figure_1": fig1,
         "figure_2": fig2,
         "figure_3": fig3,
