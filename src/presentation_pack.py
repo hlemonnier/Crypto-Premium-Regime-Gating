@@ -54,6 +54,27 @@ def _read_onchain_snapshot(episode: str, reports_root: Path) -> dict[str, Any] |
         if "onchain_source_age_hours" in frame.columns
         else pd.Series(np.nan, index=frame.index, dtype="float64")
     )
+    stress_col = (
+        frame["stress_source"].astype(str)
+        if "stress_source" in frame.columns
+        else pd.Series("", index=frame.index, dtype="object")
+    )
+    decision_col = (
+        frame["decision"].astype(str)
+        if "decision" in frame.columns
+        else pd.Series("", index=frame.index, dtype="object")
+    )
+    confidence = (
+        pd.to_numeric(frame["confidence_score"], errors="coerce")
+        if "confidence_score" in frame.columns
+        else pd.Series(np.nan, index=frame.index, dtype="float64")
+    )
+    size = (
+        pd.to_numeric(frame["position_size"], errors="coerce")
+        if "position_size" in frame.columns
+        else pd.Series(np.nan, index=frame.index, dtype="float64")
+    )
+    trade_mask = decision_col.eq("Trade")
     return {
         "episode": episode,
         "onchain_data_ratio": float(pd.to_numeric(frame["onchain_proxy"], errors="coerce").notna().mean()),
@@ -70,6 +91,11 @@ def _read_onchain_snapshot(episode: str, reports_root: Path) -> dict[str, Any] |
         "combined_depeg_count": int(pd.to_numeric(frame["depeg_flag"], errors="coerce").fillna(0).astype(bool).sum()),
         "onchain_source_timestamp_ratio": float(source_ts.notna().mean()),
         "onchain_source_age_hours_median": float(source_age.median(skipna=True)),
+        "stress_usdc_depeg_count": int((stress_col == "usdc_depeg_stress").sum()),
+        "stress_usdt_concern_count": int((stress_col == "usdt_backing_concern").sum()),
+        "stress_technical_flow_count": int((stress_col == "technical_flow_imbalance").sum()),
+        "avg_trade_confidence": float(confidence.loc[trade_mask].mean(skipna=True)) if bool(trade_mask.any()) else 0.0,
+        "avg_trade_position_size": float(size.loc[trade_mask].mean(skipna=True)) if bool(trade_mask.any()) else 0.0,
     }
 
 
@@ -226,6 +252,7 @@ def main() -> None:
         "n_bars",
         "n_active_bars",
         "horizon_days",
+        "avg_active_position_size",
     ]
     optional_cols = [
         "sharpe_full_annualized",
@@ -464,8 +491,8 @@ def main() -> None:
             ready = execution_l2_coverage_df["l2_ready"].astype(bool)
             if not bool(ready.all()):
                 handle.write(
-                    "Execution-quality conclusions are withheld for episodes without complete "
-                    "L2 orderbook + tick-trade coverage.\n"
+                    "L2 coverage is incomplete for at least one episode. "
+                    "Execution tables below are lightweight proxies and should be treated as descriptive.\n"
                 )
 
         if not execution_venue_df.empty:

@@ -1,6 +1,6 @@
-episode,onchain_data_ratio,onchain_usdc_minus_1_abs_mean,onchain_usdt_minus_1_abs_mean,onchain_divergence_abs_mean,onchain_depeg_count,combined_depeg_count,onchain_source_timestamp_ratio,onchain_source_age_hours_median
-bybit_usdc_depeg_2023,1.0,0.0012204149999999504,0.001549999999999895,0.03199005269312908,1440,1517,0.0,
-march_vol_2024_binance,1.0,0.0016265,0.00029949999999999996,0.0009370925564187885,0,0,1.0,35.99166666666667
-okx_usdc_depeg_2023,1.0,0.000819641666666632,0.001066666666666593,0.005697539253795168,960,966,0.0,
-yen_followthrough_2024_binance,1.0,0.0,0.0005934999999999,0.0005791799274366438,0,0,1.0,35.99166666666667
-yen_unwind_2024_binance,1.0,0.0010000000000000002,0.0004999999999998999,0.0013819631036159424,0,0,1.0,83.99166666666667
+episode,onchain_data_ratio,onchain_usdc_minus_1_abs_mean,onchain_usdt_minus_1_abs_mean,onchain_divergence_abs_mean,onchain_depeg_count,combined_depeg_count,onchain_source_timestamp_ratio,onchain_source_age_hours_median,stress_usdc_depeg_count,stress_usdt_concern_count,stress_technical_flow_count,avg_trade_confidence,avg_trade_position_size
+bybit_usdc_depeg_2023,1.0,0.0012204149999999504,0.001549999999999895,0.03199005269312908,1440,1517,0.0,,0,0,0,0.0,0.0
+march_vol_2024_binance,1.0,0.0016265,0.00029949999999999996,0.0009370925564187885,0,0,1.0,35.99166666666667,0,0,0,,
+okx_usdc_depeg_2023,1.0,0.000819641666666632,0.001066666666666593,0.005697539253795168,960,966,0.0,,0,0,0,,
+yen_followthrough_2024_binance,1.0,0.0,0.0005934999999999,0.0005791799274366438,0,0,1.0,35.99166666666667,0,0,0,,
+yen_unwind_2024_binance,1.0,0.0010000000000000002,0.0004999999999998999,0.0013819631036159424,0,0,1.0,83.99166666666667,0,0,0,,

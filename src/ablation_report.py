@@ -129,6 +129,7 @@ def _run_ablation_once(
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     frames = _compute_core_frames(config, matrix)
     premium_frame = frames["premium_frame"]
+    onchain_frame = frames["onchain_frame"]
     robust_frame = frames["robust_frame"]
     state_frame = frames["state_frame"]
     regime_frame = frames["regime_frame"]
@@ -208,6 +209,11 @@ def _run_ablation_once(
         sigma_hat=robust_frame["sigma_hat"],
         regime=regime_frame["regime"],
         depeg_flag=premium_frame["depeg_flag"],
+        event=robust_frame["event"],
+        stablecoin_proxy=premium_frame["stablecoin_proxy"],
+        onchain_proxy=onchain_frame.get("onchain_proxy"),
+        onchain_usdc_minus_1=onchain_frame.get("onchain_usdc_minus_1"),
+        onchain_usdt_minus_1=onchain_frame.get("onchain_usdt_minus_1"),
         n_t=None,
         cfg=strategy_cfg,
     )
@@ -217,6 +223,7 @@ def _run_ablation_once(
         m_t,
         freq=freq,
         cost_bps=backtest_cfg.cost_bps,
+        position_size=regime_decision_frame.get("position_size"),
         position_mode=backtest_cfg.position_mode,
         exit_on_widen=backtest_cfg.exit_on_widen,
         exit_on_mean_reversion=backtest_cfg.exit_on_mean_reversion,
@@ -237,6 +244,11 @@ def _run_ablation_once(
             sigma_hat=robust_frame["sigma_hat"],
             regime=regime_frame["regime"],
             depeg_flag=premium_frame["depeg_flag"],
+            event=robust_frame["event"],
+            stablecoin_proxy=premium_frame["stablecoin_proxy"],
+            onchain_proxy=onchain_frame.get("onchain_proxy"),
+            onchain_usdc_minus_1=onchain_frame.get("onchain_usdc_minus_1"),
+            onchain_usdt_minus_1=onchain_frame.get("onchain_usdt_minus_1"),
             n_t=hawkes_frame["n_t"] if "n_t" in hawkes_frame else None,
             cfg=strategy_cfg,
         )
@@ -246,6 +258,7 @@ def _run_ablation_once(
             m_t,
             freq=freq,
             cost_bps=backtest_cfg.cost_bps,
+            position_size=hawkes_decision_frame.get("position_size"),
             position_mode=backtest_cfg.position_mode,
             exit_on_widen=backtest_cfg.exit_on_widen,
             exit_on_mean_reversion=backtest_cfg.exit_on_mean_reversion,

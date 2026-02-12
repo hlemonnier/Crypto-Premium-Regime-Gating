@@ -173,6 +173,11 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
         sigma_hat=robust_frame["sigma_hat"],
         regime=regime_frame["regime"],
         depeg_flag=premium_frame["depeg_flag"],
+        event=robust_frame["event"],
+        stablecoin_proxy=premium_frame["stablecoin_proxy"],
+        onchain_proxy=onchain_frame.get("onchain_proxy"),
+        onchain_usdc_minus_1=onchain_frame.get("onchain_usdc_minus_1"),
+        onchain_usdt_minus_1=onchain_frame.get("onchain_usdt_minus_1"),
         n_t=n_t,
         cfg=strategy_cfg,
     )
@@ -190,6 +195,7 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
         p_debiased=signal_frame["p"],
         decision_gated=signal_frame["decision"],
         m_t=signal_frame["m_t"],
+        size_gated=signal_frame.get("position_size"),
         freq=freq,
         cfg=backtest_cfg,
     )

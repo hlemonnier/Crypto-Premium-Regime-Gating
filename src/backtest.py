@@ -175,6 +175,7 @@ def run_backtest(
     *,
     freq: str,
     cost_bps: float,
+    position_size: pd.Series | None = None,
     position_mode: str = "stateful",
     exit_on_widen: bool = True,
     exit_on_mean_reversion: bool = True,
@@ -191,7 +192,18 @@ def run_backtest(
         min_holding_bars=min_holding_bars,
         max_holding_bars=max_holding_bars,
     )
-    pos = position_frame["position"]
+    pos_sign = pd.to_numeric(position_frame["position"], errors="coerce").fillna(0.0).rename("position_sign")
+    if position_size is None:
+        size = pd.Series(1.0, index=pos_sign.index, dtype="float64")
+    else:
+        size = pd.to_numeric(position_size.reindex(pos_sign.index), errors="coerce")
+        size = size.fillna(0.0).clip(lower=0.0, upper=1.0)
+    size = size.where(pos_sign.ne(0.0), 0.0).rename("position_size")
+    pos = (pos_sign * size).rename("position")
+    position_frame = position_frame.drop(columns=["position"]).copy()
+    position_frame.insert(0, "position_sign", pos_sign)
+    position_frame.insert(1, "position_size", size)
+    position_frame.insert(2, "position", pos)
 
     dp = p.diff().fillna(0.0)
     gross_pnl = (pos.shift(1).fillna(0.0) * (-dp)).rename("gross_pnl")
@@ -219,6 +231,9 @@ def run_backtest(
     in_market = pos.shift(1).abs() > 0
     active_mask = in_market & net_pnl.notna()
     pnl_when_active = net_pnl.loc[active_mask]
+    avg_active_size = float(pos.shift(1).abs().where(in_market).mean(skipna=True))
+    if not np.isfinite(avg_active_size):
+        avg_active_size = 0.0
     annualization = np.sqrt(periods_per_year_from_freq(freq))
     sharpe_full = _sharpe_ratio(net_pnl)
     sharpe_full_annualized = float(sharpe_full * annualization)
@@ -265,6 +280,7 @@ def run_backtest(
         "flip_rate": flip_rate,
         "hit_rate": hit_rate,
         "active_ratio": float(in_market.mean()),
+        "avg_active_position_size": avg_active_size,
         "position_flip_rate": position_flip_rate,
         "avg_holding_bars": avg_holding,
         "n_bars": int(len(net_pnl)),
@@ -291,6 +307,7 @@ def compare_strategies(
     p_debiased: pd.Series,
     decision_gated: pd.Series,
     m_t: pd.Series,
+    size_gated: pd.Series | None = None,
     freq: str,
     cfg: BacktestConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -300,6 +317,7 @@ def compare_strategies(
         m_t,
         freq=freq,
         cost_bps=cfg.cost_bps,
+        position_size=size_gated,
         position_mode=cfg.position_mode,
         exit_on_widen=cfg.exit_on_widen,
         exit_on_mean_reversion=cfg.exit_on_mean_reversion,

@@ -377,6 +377,99 @@ class StrategyFallbackThresholdTests(unittest.TestCase):
         self.assertEqual(str(out["decision"].iloc[-1]), "Trade")
 
 
+class StressSourceDecisionTests(unittest.TestCase):
+    def test_stress_sources_drive_different_actions(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=3, freq="1min", tz="UTC")
+        m_t = pd.Series([0.05, 0.05, 0.05], index=idx, name="m_t")
+        T_t = pd.Series(1.0, index=idx, name="T_t")
+        chi_t = pd.Series(0.0, index=idx, name="chi_t")
+        sigma_hat = pd.Series(0.01, index=idx, name="sigma_hat")
+        regime = pd.Series(["stress", "stress", "stress"], index=idx, name="regime")
+        depeg_flag = pd.Series([False, False, False], index=idx, name="depeg_flag")
+        stablecoin_proxy = pd.Series([0.003, -0.003, 0.0], index=idx, name="stablecoin_proxy")
+        cfg = StrategyConfig(entry_k=1.0, threshold_min_periods=10_000)
+
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=sigma_hat,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            stablecoin_proxy=stablecoin_proxy,
+            cfg=cfg,
+        )
+
+        self.assertEqual(str(out.loc[idx[0], "stress_source"]), "usdc_depeg_stress")
+        self.assertEqual(str(out.loc[idx[1], "stress_source"]), "usdt_backing_concern")
+        self.assertEqual(str(out.loc[idx[2], "stress_source"]), "technical_flow_imbalance")
+        self.assertEqual(str(out.loc[idx[0], "decision"]), "Risk-off")
+        self.assertEqual(str(out.loc[idx[1], "decision"]), "Widen")
+        self.assertEqual(str(out.loc[idx[2], "decision"]), "Widen")
+
+
+class ConfidenceSizingTests(unittest.TestCase):
+    def test_confidence_sizing_is_bounded_and_event_sensitive(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=5, freq="1min", tz="UTC")
+        m_t = pd.Series([0.0, 0.02, 0.04, 0.08, 0.12], index=idx, name="m_t")
+        T_t = pd.Series(1.0, index=idx, name="T_t")
+        chi_t = pd.Series(0.0, index=idx, name="chi_t")
+        sigma_hat = pd.Series(0.01, index=idx, name="sigma_hat")
+        regime = pd.Series("transient", index=idx, name="regime")
+        depeg_flag = pd.Series(False, index=idx, name="depeg_flag")
+        event = pd.Series([False, False, True, False, False], index=idx, name="event")
+        cfg = StrategyConfig(entry_k=2.0, threshold_min_periods=10_000)
+
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=sigma_hat,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            event=event,
+            cfg=cfg,
+        )
+
+        size = pd.to_numeric(out["position_size"], errors="coerce")
+        self.assertTrue(((size >= 0.0) & (size <= 1.0)).all())
+        trade_mask = out["decision"] == "Trade"
+        self.assertTrue(bool(trade_mask.any()))
+        self.assertTrue(bool((size.loc[trade_mask] > 0.0).all()))
+        self.assertLess(float(size.loc[idx[2]]), float(size.loc[idx[3]]))
+
+
+class PositionSizingBacktestTests(unittest.TestCase):
+    def test_position_size_scales_pnl_and_turnover(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=3, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 1.0, 0.0], index=idx, name="premium")
+        decision = pd.Series(["Widen", "Trade", "Widen"], index=idx, name="decision")
+        m_t = pd.Series([0.0, 1.0, 0.0], index=idx, name="m_t")
+        half_size = pd.Series([0.0, 0.5, 0.0], index=idx, name="position_size")
+
+        full_log, full_metrics = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_mode="one_bar",
+        )
+        half_log, half_metrics = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_size=half_size,
+            position_mode="one_bar",
+        )
+
+        self.assertAlmostEqual(float(half_log["net_pnl"].sum()), 0.5 * float(full_log["net_pnl"].sum()), places=12)
+        self.assertAlmostEqual(float(half_metrics["turnover"]), 0.5 * float(full_metrics["turnover"]), places=12)
+        self.assertAlmostEqual(float(half_metrics["avg_active_position_size"]), 0.5, places=12)
+
+
 class PriceMatrixLoaderTests(unittest.TestCase):
     def test_loader_drops_nat_and_duplicate_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -89,6 +89,14 @@ strategy:
   entry_k: 1.0
   t_widen_quantile: 0.97
   chi_widen_quantile: 0.99
+  confidence_floor: 0.1
+  confidence_ceiling: 1.0
+  event_confidence_penalty: 0.7
+  technical_stress_penalty: 0.7
+  usdt_concern_penalty: 0.5
+  hawkes_widen_penalty: 0.75
+  proxy_stress_threshold: 0.002
+  onchain_stress_threshold: 0.003
   threshold_mode: expanding
   threshold_min_periods: 120
   hawkes_threshold_mode: expanding

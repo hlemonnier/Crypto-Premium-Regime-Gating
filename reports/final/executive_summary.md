@@ -43,12 +43,12 @@ Metric convention: `sharpe` is full-series and non-annualized. Annualized Sharpe
 ## On-Chain Validation Snapshot
 
 ```text
-                       episode  onchain_data_ratio  onchain_usdc_minus_1_abs_mean  onchain_usdt_minus_1_abs_mean  onchain_divergence_abs_mean  onchain_depeg_count  combined_depeg_count  onchain_source_timestamp_ratio  onchain_source_age_hours_median
-         bybit_usdc_depeg_2023                 1.0                       0.001220                       0.001550                     0.031990                 1440                  1517                             0.0                              NaN
-        march_vol_2024_binance                 1.0                       0.001626                       0.000299                     0.000937                    0                     0                             1.0                        35.991667
-           okx_usdc_depeg_2023                 1.0                       0.000820                       0.001067                     0.005698                  960                   966                             0.0                              NaN
-yen_followthrough_2024_binance                 1.0                       0.000000                       0.000593                     0.000579                    0                     0                             1.0                        35.991667
-       yen_unwind_2024_binance                 1.0                       0.001000                       0.000500                     0.001382                    0                     0                             1.0                        83.991667
+                       episode  onchain_data_ratio  onchain_usdc_minus_1_abs_mean  onchain_usdt_minus_1_abs_mean  onchain_divergence_abs_mean  onchain_depeg_count  combined_depeg_count  onchain_source_timestamp_ratio  onchain_source_age_hours_median  stress_usdc_depeg_count  stress_usdt_concern_count  stress_technical_flow_count  avg_trade_confidence  avg_trade_position_size
+         bybit_usdc_depeg_2023                 1.0                       0.001220                       0.001550                     0.031990                 1440                  1517                             0.0                              NaN                        0                          0                            0                   0.0                      0.0
+        march_vol_2024_binance                 1.0                       0.001626                       0.000299                     0.000937                    0                     0                             1.0                        35.991667                        0                          0                            0                   NaN                      NaN
+           okx_usdc_depeg_2023                 1.0                       0.000820                       0.001067                     0.005698                  960                   966                             0.0                              NaN                        0                          0                            0                   NaN                      NaN
+yen_followthrough_2024_binance                 1.0                       0.000000                       0.000593                     0.000579                    0                     0                             1.0                        35.991667                        0                          0                            0                   NaN                      NaN
+       yen_unwind_2024_binance                 1.0                       0.001000                       0.000500                     0.001382                    0                     0                             1.0                        83.991667                        0                          0                            0                   NaN                      NaN
 ```
 
 ## Proxy Coverage Notes
@@ -94,13 +94,15 @@ Robust aggregate exclusion map is exported to: `reports/final/final_robust_filte
 yen_followthrough_2024_binance                    True                   True      True data/processed/orderbook/yen_followthrough_2024_binance
        yen_unwind_2024_binance                    True                   True      True        data/processed/orderbook/yen_unwind_2024_binance
 ```
-Execution-quality conclusions are withheld for episodes without complete L2 orderbook + tick-trade coverage.
+L2 coverage is incomplete for at least one episode. Execution tables below are lightweight proxies and should be treated as descriptive.
 
 ## Execution Proxy Snapshot (Bar-Level)
 
 ```text
   venue market_type  n_root_episode_pairs  mean_delta_large_raw_bps  median_delta_large_raw_bps  mean_delta_large_excess_bps  median_delta_large_excess_bps  mean_delta_large_norm  median_delta_large_norm  n_indeterminate_norm  median_recovery_bars_usdc  median_recovery_bars_usdt  mean_unrecovered_ratio_usdc  mean_unrecovered_ratio_usdt
 binance derivatives                     3                 -0.972122                   -0.931979                    -0.595878                      -0.520973              -0.034535                -0.047318                     2                        4.0                        4.5                          0.0                     0.002874
+  bybit        spot                     3                  1.022176                    0.781291                     1.446459                       1.102216               1.025324                 0.050954                     0                        3.0                        3.5                          0.0                     0.000559
+    okx derivatives                     2                 -3.330216                   -3.330216                    -1.619332                      -1.619332               0.699729                 0.699729                     1                        2.0                        4.0                          0.0                     0.000000
 ```
 
 Interpretation: compare raw, excess, and normalized deltas jointly. A negative delta means lower proxy impact in USDC quotes versus USDT for the same root/venue.

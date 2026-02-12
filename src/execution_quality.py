@@ -768,9 +768,14 @@ def parse_args() -> argparse.Namespace:
         "--allow-bar-proxy-without-l2",
         action="store_true",
         help=(
-            "Allow bar-level proxy diagnostics even when L2/tick data are missing. "
-            "Default is fail-closed (no execution ranking) without L2 readiness."
+            "Compatibility switch. Lightweight bar-proxy diagnostics are now enabled by default "
+            "unless --strict-l2-required is set."
         ),
+    )
+    parser.add_argument(
+        "--strict-l2-required",
+        action="store_true",
+        help="Fail closed when L2/tick coverage is incomplete.",
     )
     parser.add_argument("--size-window", type=int, default=60, help="Rolling window for relative size proxy.")
     parser.add_argument("--min-size-periods", type=int, default=20, help="Min periods for rolling size baseline.")
@@ -812,8 +817,9 @@ def main() -> None:
 
     selected_episodes = list(args.episodes)
     partial_l2_mode = False
+    allow_bar_proxy_without_l2 = bool(args.allow_bar_proxy_without_l2) or (not bool(args.strict_l2_required))
 
-    if (not args.allow_bar_proxy_without_l2) and (not missing_l2.empty):
+    if (not allow_bar_proxy_without_l2) and (not missing_l2.empty):
         if not ready_l2.empty:
             selected_episodes = ready_l2["episode"].astype(str).tolist()
             partial_l2_mode = True
@@ -834,7 +840,7 @@ def main() -> None:
                 handle.write(l2_coverage.to_string(index=False))
                 handle.write("\n```\n")
                 handle.write(
-                    "\nNo bar-proxy fallback was produced because `--allow-bar-proxy-without-l2` was not set.\n"
+                    "\nNo bar-proxy fallback was produced because `--strict-l2-required` was set.\n"
                 )
                 handle.write(
                     "This fail-closed behavior prevents unsupported venue/quote liquidity rankings.\n"
@@ -915,7 +921,7 @@ def main() -> None:
         if partial_l2_mode:
             handle.write(
                 "Partial-L2 mode: only episodes with both orderbook+tick coverage were included "
-                "because `--allow-bar-proxy-without-l2` was not set.\n\n"
+                "because `--strict-l2-required` was set.\n\n"
             )
         handle.write("## Scope\n\n")
         for ep in selected_episodes:

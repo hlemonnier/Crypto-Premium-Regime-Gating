@@ -314,14 +314,13 @@ Build execution diagnostics from `prices_resampled.csv` (price + volume bars):
 python -m src.execution_quality --output-dir reports/final
 ```
 
-Fail-closed behavior:
+Coverage behavior:
 
-- by default, execution conclusions are blocked only if **none** of the selected episodes has both orderbook + tick-trade inputs under `data/processed/orderbook/<episode>/...`.
-- if only a subset has full coverage, diagnostics run in partial-L2 mode on covered episodes only and report skipped episodes explicitly.
-- to force bar-proxy diagnostics when L2 is missing (not recommended for venue/quote ranking), pass:
+- by default, diagnostics run in lightweight mode (bar proxy with tick/depth overlays when available), even when L2 coverage is incomplete.
+- if you need strict fail-closed behavior, pass:
 
 ```bash
-python -m src.execution_quality --output-dir reports/final --allow-bar-proxy-without-l2
+python -m src.execution_quality --output-dir reports/final --strict-l2-required
 ```
 
 Artifacts:
@@ -434,18 +433,28 @@ Metric convention in `metrics.csv`:
 
 Priority order:
 
-1. `depeg_flag == True` => `Risk-off`
-2. `regime == stress` => `Risk-off`
+1. Stress source classification:
+   - `usdc_depeg_stress`
+   - `usdt_backing_concern`
+   - `technical_flow_imbalance`
+2. Source-aware response:
+   - `usdc_depeg_stress` => `Risk-off`
+   - `usdt_backing_concern` => `Widen`
+   - `technical_flow_imbalance` => at least `Widen` in stress windows
 3. Hawkes enabled:
    - fixed mode (`strategy.hawkes_threshold_mode: fixed`): `n(t) > 0.85` => `Risk-off`, `n(t) > 0.70` => `Widen`
    - adaptive mode (`strategy.hawkes_threshold_mode: expanding|rolling`): causal quantile thresholds from `n(t)` history
 4. Else transient mode:
    - `Trade` only if `|m_t| > k * T_t * sigma_hat` (unit-consistent implementation)
    - `Widen` when high `T_t` or `chi_t`
+5. Confidence-based sizing on top of discrete decisions:
+   - `confidence_score` in `[0, 1]` combines distance-to-threshold with penalties from outlier events and stress context
+   - `position_size = confidence_score` on `Trade`, `0` otherwise
 
 Backtest execution policy (default):
 - `position_mode: stateful` (multi-bar holding)
 - enter on `Trade` with side from `sign(m_t)`
+- apply confidence-based size (`position_size`) to convert sign position into effective position
 - hold at least `min_holding_bars` after entry, then exit on `Widen`
 - exit immediately on `Risk-off` or mean-reversion (`m_t` crossing 0 versus held side)
 - turnover/costs include entries, exits, and flips (`|Δposition|`)
