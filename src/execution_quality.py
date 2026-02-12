@@ -129,25 +129,32 @@ def build_l2_coverage(episodes: list[str], l2_root: Path) -> pd.DataFrame:
                 "*orderbook*level*2*.csv",
                 "*orderbook*level*2*.zip",
                 "*orderbook*level*2*.csv.gz",
+                "*orderbook*level*2*.tar.gz",
                 "*orderbook*l2*.parquet",
                 "*orderbook*l2*.csv",
                 "*orderbook*l2*.zip",
                 "*orderbook*l2*.csv.gz",
+                "*orderbook*l2*.tar.gz",
                 "*book*l2*.parquet",
                 "*book*l2*.csv",
                 "*book*l2*.zip",
                 "*book*l2*.csv.gz",
+                "*book*l2*.tar.gz",
+                "*L2orderbook*.tar.gz",
                 "orderbook*.parquet",
                 "orderbook*.csv",
                 "orderbook*.zip",
                 "orderbook*.csv.gz",
+                "orderbook*.tar.gz",
                 "depth*.parquet",
                 "depth*.csv",
                 "depth*.zip",
                 "depth*.csv.gz",
+                "depth*.tar.gz",
                 "*bookDepth*.zip",
                 "*bookDepth*.csv",
                 "*bookDepth*.csv.gz",
+                "*bookDepth*.tar.gz",
             ],
         )
         has_ticks = _has_any_path(
@@ -161,10 +168,15 @@ def build_l2_coverage(episodes: list[str], l2_root: Path) -> pd.DataFrame:
                 "*trades*.csv",
                 "*trades*.zip",
                 "*trades*.csv.gz",
+                "**/trades/*.zip",
+                "**/trades/*.csv.gz",
+                "**/spot_trades/*.csv.gz",
                 "*aggTrade*.parquet",
                 "*aggTrade*.csv",
                 "*aggTrade*.zip",
                 "*aggTrade*.csv.gz",
+                "**/aggTrades/*.zip",
+                "**/aggTrades/*.csv.gz",
             ],
         )
         rows.append(
@@ -200,7 +212,7 @@ def _market_type_from_suffix(suffix: str | None) -> str:
     s = str(suffix or "").upper()
     if s == "SPOT":
         return "spot"
-    if s == "PERP" or s.isdigit():
+    if s in {"PERP", "SWAP", "FUTURES", "FUTURE", "PERPETUAL"} or s.isdigit():
         return "derivatives"
     return "unknown"
 
@@ -369,6 +381,43 @@ def _load_bybit_tick_file(path: Path) -> pd.DataFrame:
     return _aggregate_tick_rows(pd.concat(chunks, ignore_index=True))
 
 
+def _load_okx_tick_file(path: Path) -> pd.DataFrame:
+    if "trades" not in path.name.lower():
+        return pd.DataFrame()
+
+    header = pd.read_csv(path, compression="zip", nrows=0, encoding="utf-8", encoding_errors="ignore")
+    cols = {str(col).split("/")[0].strip().lower(): str(col) for col in header.columns}
+    ts_col = cols.get("created_time") or cols.get("createdtime") or cols.get("timestamp") or cols.get("ts")
+    price_col = cols.get("price")
+    vol_col = cols.get("size") or cols.get("qty") or cols.get("volume")
+    sym_col = cols.get("instrument_name") or cols.get("instid") or cols.get("symbol")
+    if ts_col is None or price_col is None or vol_col is None or sym_col is None:
+        return pd.DataFrame()
+
+    usecols = [ts_col, price_col, vol_col, sym_col]
+    chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(
+        path,
+        compression="zip",
+        usecols=usecols,
+        chunksize=500_000,
+        dtype="string",
+        encoding="utf-8",
+        encoding_errors="ignore",
+    ):
+        part = pd.DataFrame()
+        part["timestamp_utc"] = chunk[ts_col]
+        part["price"] = chunk[price_col]
+        part["volume"] = chunk[vol_col]
+        part["symbol"] = chunk[sym_col].astype(str).str.upper()
+        part["venue"] = "okx"
+        chunks.append(part)
+
+    if not chunks:
+        return pd.DataFrame()
+    return _aggregate_tick_rows(pd.concat(chunks, ignore_index=True))
+
+
 def _load_episode_tick_resampled(episode: str, l2_root: Path) -> pd.DataFrame | None:
     episode_root = l2_root / episode
     if not episode_root.exists():
@@ -380,7 +429,9 @@ def _load_episode_tick_resampled(episode: str, l2_root: Path) -> pd.DataFrame | 
             continue
         name = path.name
         try:
-            if name.endswith(".zip") and ("-trades-" in name or "-aggTrades-" in name):
+            if name.endswith(".zip") and "okx" in path.as_posix() and "trades" in name.lower():
+                parsed = _load_okx_tick_file(path)
+            elif name.endswith(".zip") and ("-trades-" in name or "-aggTrades-" in name):
                 parsed = _load_binance_tick_file(path)
             elif name.endswith(".csv.gz") and "bybit" in path.as_posix():
                 parsed = _load_bybit_tick_file(path)

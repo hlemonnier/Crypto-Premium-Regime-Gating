@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
+import hashlib
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -14,7 +16,7 @@ from src.execution_quality import DEFAULT_EPISODES
 
 
 PREFERRED_ROOT_ORDER = ("BTC", "ETH", "SOL", "BNB")
-SYMBOL_RE = re.compile(r"^(?P<root>[A-Z0-9]+)(?P<quote>USDT|USDC)(?:-[A-Z0-9]+)?$")
+OKX_PRIAPI_DOWNLOAD_LINK = "https://www.okx.com/priapi/v5/broker/public/trade-data/download-link"
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,17 @@ def _sort_roots(roots: set[str]) -> list[str]:
     return preferred + others
 
 
+def _extract_root_quote_from_symbol(raw_symbol: str) -> tuple[str, str] | None:
+    normalized = re.sub(r"[^A-Z0-9]", "", str(raw_symbol).upper())
+    for quote in ("USDC", "USDT"):
+        idx = normalized.find(quote)
+        if idx > 0:
+            root = normalized[:idx]
+            if root:
+                return root, quote
+    return None
+
+
 def infer_episode_symbols(
     episode: str,
     processed_root: Path,
@@ -108,10 +121,11 @@ def infer_episode_symbols(
 
     grouped: dict[str, set[str]] = {}
     for sym in raw_symbols:
-        m = SYMBOL_RE.match(sym.upper())
-        if m is None:
+        parsed = _extract_root_quote_from_symbol(sym)
+        if parsed is None:
             continue
-        grouped.setdefault(m.group("root"), set()).add(m.group("quote"))
+        root, quote = parsed
+        grouped.setdefault(root, set()).add(quote)
 
     selected: list[str] = []
     for root in _sort_roots(set(grouped.keys())):
@@ -126,6 +140,21 @@ def infer_episode_symbols(
     if max_symbols > 0:
         selected = selected[:max_symbols]
     return selected
+
+
+def _symbols_to_okx_instruments(symbols: list[str]) -> tuple[list[str], list[str]]:
+    inst_ids: set[str] = set()
+    inst_families: set[str] = set()
+    for symbol in symbols:
+        parsed = _extract_root_quote_from_symbol(symbol)
+        if parsed is None:
+            continue
+        root, quote = parsed
+        inst = f"{root}-{quote}"
+        inst_ids.add(inst)
+        inst_families.add(inst)
+    ordered = sorted(inst_ids)
+    return ordered, sorted(inst_families)
 
 
 def build_binance_trades_url(symbol: str, day: date) -> str:
@@ -167,6 +196,192 @@ def build_bybit_spot_trades_url(symbol: str, month: date) -> str:
 
 def build_bybit_derivatives_trades_url(symbol: str, day: date) -> str:
     return f"https://public.bybit.com/trading/{symbol}/{symbol}{day.strftime('%Y-%m-%d')}.csv.gz"
+
+
+def _day_end_epoch_ms(day: date) -> str:
+    dt = datetime.combine(day, time(23, 59, 59), tzinfo=timezone.utc)
+    return str(int(dt.timestamp() * 1000))
+
+
+def _as_okx_inst_query(inst_type: str, instruments: list[str]) -> dict[str, list[str]]:
+    inst_type_u = str(inst_type).upper()
+    if inst_type_u == "SPOT":
+        return {"instIdList": instruments}
+    return {"instFamilyList": instruments}
+
+
+def query_okx_priapi_download_links(
+    *,
+    module: str,
+    inst_type: str,
+    instruments: list[str],
+    day: date,
+    timeout_sec: int,
+) -> list[dict[str, str]]:
+    if not instruments:
+        return []
+    day_end_ms = _day_end_epoch_ms(day)
+    payload = {
+        "module": str(module),
+        "instType": str(inst_type).upper(),
+        "instQueryParam": _as_okx_inst_query(inst_type, instruments),
+        "dateQuery": {
+            "dateAggrType": "daily",
+            "begin": day_end_ms,
+            "end": day_end_ms,
+        },
+    }
+    try:
+        response = requests.post(
+            OKX_PRIAPI_DOWNLOAD_LINK,
+            json=payload,
+            timeout=max(10, int(timeout_sec)),
+        )
+    except Exception:
+        return []
+
+    if int(response.status_code) != 200:
+        return []
+
+    try:
+        body = response.json()
+    except Exception:
+        return []
+
+    if str(body.get("code", "")) != "0":
+        return []
+
+    details = body.get("data", {}).get("details", []) or []
+    rows: list[dict[str, str]] = []
+    for detail in details:
+        group_details = detail.get("groupDetails", []) or []
+        for group in group_details:
+            url = str(group.get("url", "")).strip()
+            filename = str(group.get("filename", "")).strip()
+            if not url:
+                continue
+            if not filename:
+                parsed = urlparse(url)
+                filename = Path(parsed.path).name
+            if not filename:
+                continue
+            rows.append(
+                {
+                    "url": url,
+                    "filename": filename,
+                    "inst_type": str(detail.get("instType", "")).upper(),
+                    "inst_family": str(detail.get("instFamily", "")).upper(),
+                    "inst_id": str(detail.get("instId", "")).upper(),
+                }
+            )
+    return rows
+
+
+def build_okx_priapi_orderbook_tasks(
+    *,
+    episode: str,
+    symbols: list[str],
+    days: list[date],
+    output_root: Path,
+    timeout_sec: int,
+    modules: list[str],
+    inst_types: list[str],
+) -> list[FetchTask]:
+    episode_root = output_root / episode
+    inst_ids, inst_families = _symbols_to_okx_instruments(symbols)
+    tasks: list[FetchTask] = []
+    seen: set[tuple[str, str]] = set()
+
+    for module in modules:
+        module_s = str(module)
+        for inst_type in inst_types:
+            inst_type_u = str(inst_type).upper()
+            instruments = inst_ids if inst_type_u == "SPOT" else inst_families
+            for day in days:
+                links = query_okx_priapi_download_links(
+                    module=module_s,
+                    inst_type=inst_type_u,
+                    instruments=instruments,
+                    day=day,
+                    timeout_sec=timeout_sec,
+                )
+                for link in links:
+                    filename = link["filename"]
+                    key = (module_s, filename)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    folder = "orderbook_l2_400lv" if module_s == "4" else f"orderbook_l2_module_{module_s}"
+                    tasks.append(
+                        FetchTask(
+                            episode=episode,
+                            venue="okx",
+                            kind=folder,
+                            symbol=link.get("inst_family") or link.get("inst_id") or None,
+                            day=day,
+                            url=link["url"],
+                            destination=episode_root / "okx" / folder / filename,
+                        )
+                    )
+    return tasks
+
+
+def build_external_manifest_tasks(
+    *,
+    manifest_path: Path,
+    output_root: Path,
+    episodes_filter: set[str],
+) -> dict[str, list[FetchTask]]:
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"External URL manifest not found: {manifest_path}")
+    frame = pd.read_csv(manifest_path)
+    required = {"episode", "url"}
+    if not required.issubset(set(frame.columns)):
+        raise ValueError(
+            f"External URL manifest must include columns: {sorted(required)}. "
+            f"Found: {sorted(frame.columns.tolist())}"
+        )
+
+    out: dict[str, list[FetchTask]] = {}
+    for _, row in frame.iterrows():
+        episode = str(row.get("episode", "")).strip()
+        url = str(row.get("url", "")).strip()
+        if not episode or not url:
+            continue
+        if episodes_filter and episode not in episodes_filter:
+            continue
+
+        venue = str(row.get("venue", "external")).strip() or "external"
+        kind = str(row.get("kind", "external")).strip() or "external"
+        symbol = str(row.get("symbol", "")).strip() or None
+
+        day_raw = str(row.get("day", "")).strip()
+        day = parse_iso_date(day_raw) if day_raw else date.today()
+
+        local_rel = str(row.get("local_path", "")).strip()
+        if local_rel:
+            destination = (output_root / episode / local_rel).resolve()
+        else:
+            filename = str(row.get("filename", "")).strip()
+            if not filename:
+                filename = Path(urlparse(url).path).name
+            if not filename:
+                digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+                filename = f"external_{digest}.bin"
+            destination = output_root / episode / venue / kind / filename
+
+        out.setdefault(episode, []).append(
+            FetchTask(
+                episode=episode,
+                venue=venue,
+                kind=kind,
+                symbol=symbol,
+                day=day,
+                url=url,
+                destination=destination,
+            )
+        )
+    return out
 
 
 def _month_start(day: date) -> date:
@@ -355,6 +570,18 @@ def fetch_one(task: FetchTask, *, timeout: int, skip_existing: bool) -> dict[str
         }
 
 
+def dedupe_tasks(tasks: list[FetchTask]) -> list[FetchTask]:
+    out: list[FetchTask] = []
+    seen: set[tuple[str, str]] = set()
+    for task in tasks:
+        key = (task.url, str(task.destination))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(task)
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -396,6 +623,37 @@ def parse_args() -> argparse.Namespace:
         default="reports/final/execution_data_manifest.csv",
         help="Output CSV manifest path.",
     )
+    parser.add_argument(
+        "--external-url-manifest",
+        default=None,
+        help=(
+            "Optional CSV with direct file URLs to ingest (columns: episode,url; optional: "
+            "venue,kind,symbol,day,filename,local_path). Useful for manual Bybit/OKX portal exports."
+        ),
+    )
+    parser.add_argument(
+        "--disable-okx-priapi-orderbook",
+        action="store_true",
+        help="Disable OKX priapi orderbook discovery (module 4).",
+    )
+    parser.add_argument(
+        "--okx-orderbook-modules",
+        nargs="+",
+        default=["4"],
+        help="OKX priapi orderbook module list (default: 4 for 400-level L2).",
+    )
+    parser.add_argument(
+        "--okx-priapi-inst-types",
+        nargs="+",
+        default=["SWAP", "SPOT"],
+        help="OKX inst types to query for orderbook modules (default: SWAP SPOT).",
+    )
+    parser.add_argument(
+        "--okx-priapi-timeout-sec",
+        type=int,
+        default=30,
+        help="Timeout in seconds for OKX priapi metadata discovery calls.",
+    )
     return parser.parse_args()
 
 
@@ -408,10 +666,26 @@ def main() -> None:
 
     override_start = parse_iso_date(args.start) if args.start else None
     override_end = parse_iso_date(args.end) if args.end else None
+    episodes_filter = set(str(ep) for ep in args.episodes)
+
+    external_tasks_by_episode: dict[str, list[FetchTask]] = {}
+    if args.external_url_manifest:
+        manifest_in = Path(args.external_url_manifest)
+        external_tasks_by_episode = build_external_manifest_tasks(
+            manifest_path=manifest_in,
+            output_root=output_root,
+            episodes_filter=episodes_filter,
+        )
 
     all_rows: list[dict[str, Any]] = []
     total_tasks = 0
     for episode in args.episodes:
+        tasks: list[FetchTask] = []
+        symbols: list[str] = []
+        venue = "unknown"
+        start: date | None = None
+        end: date | None = None
+        episode_external = list(external_tasks_by_episode.get(str(episode), []))
         try:
             venue = infer_episode_venue(episode, processed_root)
             start, end = infer_episode_bounds(
@@ -435,22 +709,57 @@ def main() -> None:
                 output_root=output_root,
                 include_agg_trades=bool(args.include_agg_trades),
             )
+            if venue.lower() == "okx" and (not bool(args.disable_okx_priapi_orderbook)):
+                days = _episode_days(start, end)
+                okx_priapi_tasks = build_okx_priapi_orderbook_tasks(
+                    episode=episode,
+                    symbols=symbols,
+                    days=days,
+                    output_root=output_root,
+                    timeout_sec=int(args.okx_priapi_timeout_sec),
+                    modules=[str(m) for m in args.okx_orderbook_modules],
+                    inst_types=[str(s).upper() for s in args.okx_priapi_inst_types],
+                )
+                tasks.extend(okx_priapi_tasks)
         except Exception as exc:
+            if not episode_external:
+                all_rows.append(
+                    {
+                        "episode": episode,
+                        "venue": "",
+                        "kind": "",
+                        "symbol": "",
+                        "day": "",
+                        "url": "",
+                        "local_path": "",
+                        "status": f"episode_error:{type(exc).__name__}",
+                        "http_status": -1,
+                        "bytes": 0,
+                    }
+                )
+                print(f"- {episode}: episode_error ({exc})")
+                continue
+            print(f"- {episode}: warning episode metadata unavailable ({exc}); using external URL manifest only.")
+
+        if episode_external:
+            tasks.extend(episode_external)
+        tasks = dedupe_tasks(tasks)
+        if not tasks:
+            print(f"- {episode}: no fetch tasks generated (venue={venue}, symbols={symbols})")
             all_rows.append(
                 {
                     "episode": episode,
-                    "venue": "",
+                    "venue": venue,
                     "kind": "",
                     "symbol": "",
                     "day": "",
                     "url": "",
                     "local_path": "",
-                    "status": f"episode_error:{type(exc).__name__}",
-                    "http_status": -1,
+                    "status": "no_tasks",
+                    "http_status": 204,
                     "bytes": 0,
                 }
             )
-            print(f"- {episode}: episode_error ({exc})")
             continue
 
         total_tasks += len(tasks)
@@ -487,7 +796,7 @@ def main() -> None:
     downloaded = int((manifest["status"] == "downloaded").sum()) if "status" in manifest else 0
     skipped = int((manifest["status"] == "skipped_existing").sum()) if "status" in manifest else 0
     errors = int(
-        (~manifest["status"].astype(str).isin({"downloaded", "skipped_existing", "http_error"})).sum()
+        (~manifest["status"].astype(str).isin({"downloaded", "skipped_existing", "http_error", "no_tasks"})).sum()
     ) if "status" in manifest else 0
     http_errors = int((manifest["status"] == "http_error").sum()) if "status" in manifest else 0
     print("Execution data bootstrap completed.")

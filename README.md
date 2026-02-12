@@ -308,6 +308,18 @@ python -m src.execution_data \
   --include-agg-trades
 ```
 
+Optional for manual portal exports (Bybit/OKX historical pages): provide a CSV with direct URLs:
+
+```bash
+python -m src.execution_data \
+  --episodes bybit_usdc_depeg_2023 okx_usdc_depeg_2023 \
+  --external-url-manifest data/raw/execution_external_urls.csv \
+  --skip-existing
+```
+
+`src.execution_data` now also attempts OKX public `priapi` orderbook discovery (module `4`, 400-level L2) by default.
+Disable it with `--disable-okx-priapi-orderbook`.
+
 Build execution diagnostics from `prices_resampled.csv` (price + volume bars):
 
 ```bash

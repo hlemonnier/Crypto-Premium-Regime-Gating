@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,13 @@ import pandas as pd
 from src.backtest import periods_per_year_from_freq, run_backtest
 from src.bybit_data import bybit_interval_to_ms
 from src.data_ingest import _remove_glitches, read_market_file, sanitize_single_bar_spikes
-from src.execution_quality import build_cross_quote_comparison, build_l2_coverage, build_venue_summary
+from src.execution_data import _extract_root_quote_from_symbol
+from src.execution_quality import (
+    _load_okx_tick_file,
+    build_cross_quote_comparison,
+    build_l2_coverage,
+    build_venue_summary,
+)
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.pipeline import load_price_matrix
 from src.premium import PremiumConfig, build_premium_frame, compute_depeg_flag
@@ -767,6 +774,43 @@ class ExecutionProxyTests(unittest.TestCase):
             self.assertTrue(bool(coverage.loc[0, "l2_orderbook_available"]))
             self.assertTrue(bool(coverage.loc[0, "tick_trades_available"]))
             self.assertTrue(bool(coverage.loc[0, "l2_ready"]))
+
+    def test_l2_coverage_detects_tar_gz_orderbook_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            episode_root = Path(tmp_dir) / "ep_okx"
+            episode_root.mkdir(parents=True, exist_ok=True)
+            (episode_root / "BTC-USDT-SWAP-L2orderbook-400lv-2026-02-01.tar.gz").write_bytes(b"tgz")
+            (episode_root / "allfuture-trades-2026-02-01.zip").write_bytes(b"zip")
+            coverage = build_l2_coverage(["ep_okx"], Path(tmp_dir))
+            self.assertEqual(coverage.shape[0], 1)
+            self.assertTrue(bool(coverage.loc[0, "l2_orderbook_available"]))
+            self.assertTrue(bool(coverage.loc[0, "tick_trades_available"]))
+            self.assertTrue(bool(coverage.loc[0, "l2_ready"]))
+
+    def test_okx_tick_loader_parses_zip_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "allfuture-trades-2024-05-01.zip"
+            csv_text = (
+                "instrument_name/inst,trade_id/id,side/s,size/qty,price/p,created_time/ts\n"
+                "BTC-USDT-SWAP,1,buy,2,45000,1714521600000\n"
+                "BTC-USDT-SWAP,2,sell,1,45010,1714521601000\n"
+            )
+            with zipfile.ZipFile(path, mode="w", compression=zipfile.ZIP_DEFLATED) as handle:
+                handle.writestr("allfuture-trades-2024-05-01.csv", csv_text)
+
+            parsed = _load_okx_tick_file(path)
+            self.assertFalse(parsed.empty)
+            self.assertIn("symbol", parsed.columns)
+            self.assertIn("venue", parsed.columns)
+            self.assertEqual(str(parsed.loc[0, "symbol"]), "BTC-USDT-SWAP")
+            self.assertEqual(str(parsed.loc[0, "venue"]), "okx")
+            self.assertAlmostEqual(float(parsed.loc[0, "volume"]), 3.0, places=9)
+
+    def test_symbol_parser_handles_hyphenated_contracts(self) -> None:
+        parsed = _extract_root_quote_from_symbol("BTC-USDT-SWAP")
+        self.assertEqual(parsed, ("BTC", "USDT"))
+        parsed_usdc = _extract_root_quote_from_symbol("ETHUSDC-240329")
+        self.assertEqual(parsed_usdc, ("ETH", "USDC"))
 
 
 if __name__ == "__main__":
