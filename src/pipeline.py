@@ -603,6 +603,18 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     entry_threshold = pd.to_numeric(signal_frame.get("entry_threshold", pd.Series(np.nan, index=signal_frame.index)), errors="coerce")
     temperature = pd.to_numeric(signal_frame.get("T_t", pd.Series(np.nan, index=signal_frame.index)), errors="coerce")
     onchain_stale = signal_frame.get("onchain_data_stale", pd.Series(False, index=signal_frame.index)).astype(bool)
+    gated_active_ratio = float(pd.to_numeric(metrics.loc["gated", "active_ratio"], errors="coerce")) if "gated" in metrics.index else float("nan")
+    naive_active_ratio = float(pd.to_numeric(metrics.loc["naive", "active_ratio"], errors="coerce")) if "naive" in metrics.index else float("nan")
+    gated_comparable_vs_naive = (
+        int(pd.to_numeric(metrics.loc["gated", "comparable_vs_naive"], errors="coerce"))
+        if ("gated" in metrics.index and "comparable_vs_naive" in metrics.columns)
+        else 0
+    )
+    gated_degenerate_no_trade = (
+        int(pd.to_numeric(metrics.loc["gated", "degenerate_no_trade"], errors="coerce"))
+        if ("gated" in metrics.index and "degenerate_no_trade" in metrics.columns)
+        else 0
+    )
     safety_diag = pd.DataFrame(
         [
             {
@@ -612,6 +624,10 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
                 "trade_but_trade_signal_false": int((trade_flag & ~trade_signal).sum()),
                 "trade_with_entry_threshold_nan": int((trade_flag & entry_threshold.isna()).sum()),
                 "trade_with_T_t_nan": int((trade_flag & temperature.isna()).sum()),
+                "gated_active_ratio": gated_active_ratio,
+                "naive_active_ratio": naive_active_ratio,
+                "gated_comparable_vs_naive": gated_comparable_vs_naive,
+                "gated_degenerate_no_trade": gated_degenerate_no_trade,
                 "hawkes_quality_pass": bool(signal_frame.get("hawkes_quality_pass", pd.Series(False)).iloc[0])
                 if not signal_frame.empty
                 else False,

@@ -16,6 +16,7 @@ DEFAULT_EPISODES = [
     "yen_unwind_2024_binance",
     "yen_followthrough_2024_binance",
 ]
+MIN_COMPARABLE_ACTIVE_RATIO = 0.01
 
 
 def _read_metrics_for_episode(episode: str, reports_root: Path) -> pd.DataFrame | None:
@@ -326,15 +327,36 @@ def main() -> None:
                 "episode",
             ].astype(str).tolist()
         )
+    non_comparable_episodes: set[str] = set()
+    if "comparable_vs_naive_gated" in wide_for_plot.columns:
+        comparable = pd.to_numeric(wide_for_plot["comparable_vs_naive_gated"], errors="coerce").fillna(0.0)
+        non_comparable_episodes = set(wide_for_plot.index[comparable <= 0.0].astype(str).tolist())
+    elif {"active_ratio_naive", "active_ratio_gated"}.issubset(set(wide_for_plot.columns)):
+        naive_active = pd.to_numeric(wide_for_plot["active_ratio_naive"], errors="coerce")
+        gated_active = pd.to_numeric(wide_for_plot["active_ratio_gated"], errors="coerce")
+        comparable_mask = (
+            naive_active.gt(float(MIN_COMPARABLE_ACTIVE_RATIO))
+            & gated_active.gt(float(MIN_COMPARABLE_ACTIVE_RATIO))
+        )
+        non_comparable_episodes = set(wide_for_plot.index[~comparable_mask.fillna(False)].astype(str).tolist())
+
+    robust_exclusion_episodes = set(localized_naive_episodes) | set(non_comparable_episodes)
+    robust_filter_rows: list[dict[str, Any]] = []
+    for ep in wide_for_plot.index.astype(str):
+        reasons: list[str] = []
+        if ep in localized_naive_episodes:
+            reasons.append("localized_naive_positive_pnl")
+        if ep in non_comparable_episodes:
+            reasons.append("gated_non_comparable_zero_or_low_activity")
+        robust_filter_rows.append(
+            {
+                "episode": ep,
+                "exclude_from_robust_aggregate": len(reasons) > 0,
+                "exclude_reason": ";".join(reasons),
+            }
+        )
     robust_filter_df = pd.DataFrame(
-        {
-            "episode": list(wide_for_plot.index.astype(str)),
-            "exclude_from_robust_aggregate": [ep in localized_naive_episodes for ep in wide_for_plot.index.astype(str)],
-            "exclude_reason": [
-                "localized_naive_positive_pnl" if ep in localized_naive_episodes else ""
-                for ep in wide_for_plot.index.astype(str)
-            ],
-        }
+        robust_filter_rows
     )
     robust_filter_path = output_dir / "final_robust_filter.csv"
     robust_filter_df.to_csv(robust_filter_path, index=False)
@@ -377,27 +399,34 @@ def main() -> None:
                 handle.write(f"- Raw episodes with Sharpe degradation: `{sharpe_down}/{sharpe_total}`\n")
 
                 sharpe_eval = sharpe_valid
-                if localized_naive_episodes:
-                    sharpe_eval = sharpe_valid.loc[~sharpe_valid.index.isin(localized_naive_episodes)]
+                if robust_exclusion_episodes:
+                    sharpe_eval = sharpe_valid.loc[~sharpe_valid.index.isin(robust_exclusion_episodes)]
                     excluded = sorted(set(sharpe_valid.index) - set(sharpe_eval.index))
                     if excluded:
                         handle.write(
-                            f"- Robust Sharpe aggregate excludes localized naive episodes: `{excluded}`\n"
+                            f"- Robust Sharpe aggregate exclusions: `{excluded}`\n"
                         )
-                        handle.write(
-                            f"- Robust mean Sharpe delta (gated - naive): "
-                            f"`{float(sharpe_eval.mean()):.4f}`\n"
-                        )
-                        handle.write(
-                            f"- Robust median Sharpe delta (gated - naive): "
-                            f"`{float(sharpe_eval.median()):.4f}`\n"
-                        )
+                if non_comparable_episodes:
+                    handle.write(
+                        f"- Non-comparable episodes (gated inactive/low activity <= {MIN_COMPARABLE_ACTIVE_RATIO:.2f} active ratio): "
+                        f"`{sorted(non_comparable_episodes)}`\n"
+                    )
 
-                if float(sharpe_eval.mean()) > 0:
-                    handle.write("- Conclusion (Sharpe): gated improvement is positive on robust aggregate.\n")
+                if not sharpe_eval.empty:
+                    handle.write(
+                        f"- Robust mean Sharpe delta (gated - naive): "
+                        f"`{float(sharpe_eval.mean()):.4f}`\n"
+                    )
+                    handle.write(
+                        f"- Robust median Sharpe delta (gated - naive): "
+                        f"`{float(sharpe_eval.median()):.4f}`\n"
+                    )
+
+                if (not sharpe_eval.empty) and float(sharpe_eval.mean()) > 0:
+                    handle.write("- Conclusion (Sharpe): gated improvement is positive on robust aggregate (comparable episodes only).\n")
                 else:
                     handle.write(
-                        "- Conclusion (Sharpe): gated improvement is **not** demonstrated on robust aggregate.\n"
+                        "- Conclusion (Sharpe): gated improvement is **not** demonstrated on robust aggregate (comparable episodes only).\n"
                     )
 
         if "pnl_net_gated" in wide_for_plot.columns and "pnl_net_naive" in wide_for_plot.columns:
@@ -417,27 +446,28 @@ def main() -> None:
                 handle.write(f"- Raw episodes with PnL degradation: `{pnl_down}/{pnl_total}`\n")
 
                 pnl_eval = pnl_valid
-                if localized_naive_episodes:
-                    pnl_eval = pnl_valid.loc[~pnl_valid.index.isin(localized_naive_episodes)]
+                if robust_exclusion_episodes:
+                    pnl_eval = pnl_valid.loc[~pnl_valid.index.isin(robust_exclusion_episodes)]
                     excluded = sorted(set(pnl_valid.index) - set(pnl_eval.index))
                     if excluded:
                         handle.write(
-                            f"- Robust PnL aggregate excludes localized naive episodes: `{excluded}`\n"
+                            f"- Robust PnL aggregate exclusions: `{excluded}`\n"
                         )
-                        handle.write(
-                            f"- Robust mean PnL delta (gated - naive): "
-                            f"`{float(pnl_eval.mean()):.6f}`\n"
-                        )
-                        handle.write(
-                            f"- Robust median PnL delta (gated - naive): "
-                            f"`{float(pnl_eval.median()):.6f}`\n"
-                        )
+                if not pnl_eval.empty:
+                    handle.write(
+                        f"- Robust mean PnL delta (gated - naive): "
+                        f"`{float(pnl_eval.mean()):.6f}`\n"
+                    )
+                    handle.write(
+                        f"- Robust median PnL delta (gated - naive): "
+                        f"`{float(pnl_eval.median()):.6f}`\n"
+                    )
 
-                if float(pnl_eval.mean()) > 0:
-                    handle.write("- Conclusion (PnL): gated improvement is positive on robust aggregate.\n")
+                if (not pnl_eval.empty) and float(pnl_eval.mean()) > 0:
+                    handle.write("- Conclusion (PnL): gated improvement is positive on robust aggregate (comparable episodes only).\n")
                 else:
                     handle.write(
-                        "- Conclusion (PnL): gated improvement is **not** demonstrated on robust aggregate.\n"
+                        "- Conclusion (PnL): gated improvement is **not** demonstrated on robust aggregate (comparable episodes only).\n"
                     )
 
         if not onchain_df.empty:

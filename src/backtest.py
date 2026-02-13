@@ -19,6 +19,9 @@ class BacktestConfig:
     widen_floor_size: float = 0.25
 
 
+MIN_COMPARABLE_ACTIVE_RATIO = 0.01
+
+
 def periods_per_year_from_freq(freq: str) -> float:
     seconds = pd.to_timedelta(freq).total_seconds()
     if seconds <= 0:
@@ -443,6 +446,24 @@ def compare_strategies(
         [naive_metrics, gated_metrics],
         index=["naive", "gated"],
     )
+    metrics["is_active_strategy"] = (
+        pd.to_numeric(metrics.get("n_active_bars"), errors="coerce").fillna(0.0).gt(0.0).astype(int)
+    )
+    metrics["degenerate_no_trade"] = (
+        pd.to_numeric(metrics.get("turnover"), errors="coerce").fillna(0.0).le(0.0)
+        | pd.to_numeric(metrics.get("n_active_bars"), errors="coerce").fillna(0.0).le(0.0)
+    ).astype(int)
+    metrics["comparable_vs_naive"] = 1
+    if {"naive", "gated"}.issubset(set(metrics.index)):
+        naive_active = float(pd.to_numeric(metrics.loc["naive", "active_ratio"], errors="coerce"))
+        gated_active = float(pd.to_numeric(metrics.loc["gated", "active_ratio"], errors="coerce"))
+        comparable = int(
+            np.isfinite(naive_active)
+            and np.isfinite(gated_active)
+            and (naive_active > MIN_COMPARABLE_ACTIVE_RATIO)
+            and (gated_active > MIN_COMPARABLE_ACTIVE_RATIO)
+        )
+        metrics.loc["gated", "comparable_vs_naive"] = comparable
     return metrics, gated_log, naive_log
 
 
