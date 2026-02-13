@@ -21,7 +21,7 @@ This report consolidates final episode performance and on-chain diagnostics.
 yen_followthrough_2024_binance   gated -0.005732 -0.000551     -0.001552    247.50   0.119486      0.296875  0.528655    2880            855      1.999306                  0.466901                   0.337284                0.161215                 0.866667                       1.740763               0.753715               -4.157140       0.086344                 62.619431            725.230998
 ```
 
-Metric convention: `sharpe` is full-series and non-annualized. Annualized Sharpe columns are exported for reference only.
+Metric convention: `sharpe` is full-series and non-annualized. Annualized Sharpe columns are reference-only and not used for claims. On ~2-day windows, annualization inflates magnitude; rely on raw `sharpe` for comparisons.
 
 - Raw mean Sharpe delta (gated - naive, full-series non-annualized): `0.0437`
 - Raw median Sharpe delta (gated - naive, full-series non-annualized): `0.0323`

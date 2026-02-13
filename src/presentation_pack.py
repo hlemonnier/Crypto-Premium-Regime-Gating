@@ -19,6 +19,15 @@ DEFAULT_EPISODES = [
 MIN_COMPARABLE_ACTIVE_RATIO = 0.01
 
 
+def _read_csv_or_parquet(csv_path: Path) -> pd.DataFrame | None:
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    parquet_path = csv_path.with_suffix(".parquet")
+    if parquet_path.exists():
+        return pd.read_parquet(parquet_path)
+    return None
+
+
 def _read_metrics_for_episode(episode: str, reports_root: Path) -> pd.DataFrame | None:
     metrics_path = reports_root / "episodes" / episode / "tables" / "metrics.csv"
     if not metrics_path.exists():
@@ -32,9 +41,9 @@ def _read_metrics_for_episode(episode: str, reports_root: Path) -> pd.DataFrame 
 
 def _read_onchain_snapshot(episode: str, reports_root: Path) -> dict[str, Any] | None:
     signal_path = reports_root / "episodes" / episode / "tables" / "signal_frame.csv"
-    if not signal_path.exists():
+    frame = _read_csv_or_parquet(signal_path)
+    if frame is None:
         return None
-    frame = pd.read_csv(signal_path)
     needed = {
         "onchain_proxy",
         "onchain_divergence",
@@ -102,15 +111,28 @@ def _read_onchain_snapshot(episode: str, reports_root: Path) -> dict[str, Any] |
 
 def _read_proxy_coverage(episode: str, reports_root: Path) -> dict[str, Any] | None:
     proxy_path = reports_root / "episodes" / episode / "tables" / "stablecoin_proxy_components.csv"
-    if not proxy_path.exists():
+    frame = _read_csv_or_parquet(proxy_path)
+    if frame is None:
         return None
-    frame = pd.read_csv(proxy_path, nrows=1)
+    frame = frame.head(1)
     cols = [
         c
         for c in frame.columns
         if c not in {"timestamp_utc", "Unnamed: 0"} and not str(c).startswith("Unnamed:")
     ]
     return {"episode": episode, "proxy_component_count": int(len(cols))}
+
+
+def _read_coherence_row(episode: str, reports_root: Path) -> dict[str, Any] | None:
+    path = reports_root / "episodes" / episode / "tables" / "coherence_diagnostics.csv"
+    if not path.exists():
+        return None
+    frame = pd.read_csv(path)
+    if frame.empty:
+        return None
+    row = frame.iloc[0].to_dict()
+    row["episode"] = episode
+    return row
 
 
 def _read_pnl_localization(
@@ -230,6 +252,7 @@ def main() -> None:
     onchain_rows: list[dict[str, Any]] = []
     proxy_rows: list[dict[str, Any]] = []
     localization_rows: list[dict[str, Any]] = []
+    coherence_rows: list[dict[str, Any]] = []
     for episode in args.episodes:
         frame = _read_metrics_for_episode(episode, reports_root)
         if frame is not None:
@@ -244,6 +267,9 @@ def main() -> None:
             loc = _read_pnl_localization(episode, variant, reports_root)
             if loc is not None:
                 localization_rows.append(loc)
+        coherence = _read_coherence_row(episode, reports_root)
+        if coherence is not None:
+            coherence_rows.append(coherence)
 
     if not metric_frames:
         raise FileNotFoundError("No episode metrics found for selected episodes.")
@@ -303,6 +329,10 @@ def main() -> None:
     localization_path = output_dir / "final_pnl_localization.csv"
     if not localization_df.empty:
         localization_df.to_csv(localization_path, index=False)
+    coherence_df = pd.DataFrame(coherence_rows).sort_values("episode") if coherence_rows else pd.DataFrame()
+    coherence_path = output_dir / "final_coherence_diagnostics.csv"
+    if not coherence_df.empty:
+        coherence_df.to_csv(coherence_path, index=False)
 
     calibration_details_path = output_dir / "calibration_details.csv"
     calibration_agg_path = output_dir / "calibration_aggregate.csv"
@@ -388,7 +418,8 @@ def main() -> None:
         handle.write("\n```\n")
         handle.write(
             "\nMetric convention: `sharpe` is full-series and non-annualized. "
-            "Annualized Sharpe columns are exported for reference only.\n"
+            "Annualized Sharpe columns are reference-only and not used for claims. "
+            "On ~2-day windows, annualization inflates magnitude; rely on raw `sharpe` for comparisons.\n"
         )
 
         if "sharpe_gated" in wide_for_plot.columns and "sharpe_naive" in wide_for_plot.columns:
@@ -579,6 +610,27 @@ def main() -> None:
             )
             handle.write(f"Robust aggregate exclusion map is exported to: `{robust_filter_path}`.\n")
 
+        if not coherence_df.empty:
+            handle.write("\n## Coherence Diagnostics\n\n")
+            show_cols = [
+                "episode",
+                "event_bars",
+                "event_segment_count",
+                "event_segment_median_bars",
+                "regime_segment_median_bars",
+                "decision_segment_median_bars",
+                "decision_flip_rate",
+            ]
+            show_cols = [c for c in show_cols if c in coherence_df.columns]
+            handle.write("```text\n")
+            handle.write(coherence_df[show_cols].to_string(index=False))
+            handle.write("\n```\n")
+            handle.write(
+                "Interpretation: low event clustering, longer regime segments, and lower decision flip-rate "
+                "indicate more stable gating behavior.\n"
+            )
+            handle.write(f"Machine-readable export: `{coherence_path}`.\n")
+
         if not execution_l2_coverage_df.empty:
             handle.write("\n## Execution Data Readiness (L2)\n\n")
             handle.write("```text\n")
@@ -632,6 +684,8 @@ def main() -> None:
             handle.write(f"- `{proxy_path}`\n")
         if not localization_df.empty:
             handle.write(f"- `{localization_path}`\n")
+        if not coherence_df.empty:
+            handle.write(f"- `{coherence_path}`\n")
         if execution_report_path.exists():
             handle.write(f"- `{execution_report_path}`\n")
         handle.write(f"- `{robust_filter_path}`\n")

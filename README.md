@@ -12,6 +12,9 @@ python -m unittest discover -s tests -p 'test_*.py' -q
 python -m src.pipeline --config configs/config.yaml
 ```
 
+Quickstart note: this default command is a **single-episode** baseline run (configured on `bybit_usdc_depeg_2023`).
+Use the submission regeneration command below to refresh the multi-episode outputs referenced in `reports/final/executive_summary.md`.
+
 Default runnable input already configured in `configs/config.yaml`:
 
 - `data/processed/episodes/bybit_usdc_depeg_2023/prices_matrix.csv`
@@ -86,6 +89,7 @@ Runtime folders:
 - `tests/test_robustness_report.py`: robustness report tests
 - `scripts/package_submission.sh`: create clean recruiter zip
 - `scripts/clean_local_artifacts.sh`: remove local temporary artifacts
+- `scripts/regenerate_submission_outputs.sh`: rerun multi-episode outputs + final summary
 
 ## Command index (essential)
 
@@ -93,6 +97,12 @@ Run pipeline:
 
 ```bash
 python -m src.pipeline --config configs/config.yaml
+```
+
+Regenerate submission outputs (multi-episode + final executive summary) in one command:
+
+```bash
+./scripts/regenerate_submission_outputs.sh
 ```
 
 Build matrix from raw files:
@@ -129,7 +139,19 @@ Robustness defaults:
 
 Strategy gating default:
 
-- `strategy.strict_notice_gating: true` enforces a hard precondition before `Trade`: `|m_t| > entry_k * T_t * sigma_hat`.
+- `strategy.strict_notice_gating: true` enforces a hard precondition before `Trade`: `|m_t| > entry_k * T_t * sigma_scale`.
+
+Definition deviations from AGENTS defaults (explicit):
+
+- Runtime config default sets `strategy.m_t_source: p` in `configs/config.yaml`, so `m_t` uses raw debiased premium (`p`) unless you override it.
+- Selector implementation is in `src/pipeline.py` (`_select_mispricing_signal`), with accepted sources `p_smooth`, `p`, `residual`.
+- Entry guardrail implementation in `src/strategy.py` uses `|m_t| > entry_k * T_t * sigma_scale`, where `sigma_scale` uses `sigma_hat` when available and a positive fallback otherwise.
+
+Sharpe interpretation on short windows:
+
+- `metrics.csv` exports both raw and annualized Sharpe.
+- For ~2-day episodes, annualization can inflate scale and should be treated as reference-only.
+- Performance claims should use raw full-series `sharpe` columns for comparability.
 
 Packaging helpers:
 
@@ -155,6 +177,7 @@ Pipeline output files (default):
 - `reports/tables/signal_frame.parquet` (fallback: `reports/tables/signal_frame.csv`)
 - `reports/tables/stablecoin_proxy_components.parquet` (fallback: `reports/tables/stablecoin_proxy_components.csv`)
 - `reports/tables/safety_diagnostics.csv`
+- `reports/tables/coherence_diagnostics.csv`
 - `reports/tables/scope_audit.csv`
 - `reports/tables/edge_net_size_curve.csv`
 - `reports/tables/break_even_premium_curve.csv`

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import pandas as pd
@@ -40,6 +41,45 @@ def _write_episode_metrics(
         index=["naive", "gated"],
     )
     frame.to_csv(tables_dir / "metrics.csv")
+
+
+def _write_signal_proxy_and_coherence(reports_root: Path, episode: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    tables_dir = reports_root / "episodes" / episode / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    signal = pd.DataFrame(
+        {
+            "onchain_proxy": [0.001, 0.002],
+            "onchain_divergence": [0.001, 0.002],
+            "onchain_depeg_flag": [0, 1],
+            "depeg_flag": [0, 1],
+            "onchain_usdc_minus_1": [0.0005, 0.0010],
+            "onchain_usdt_minus_1": [0.0004, 0.0008],
+            "decision": ["Trade", "Risk-off"],
+            "stress_source": ["technical_flow_imbalance", "usdc_depeg_stress"],
+            "confidence_score": [0.8, 0.0],
+            "position_size": [0.7, 0.0],
+        }
+    )
+    (tables_dir / "signal_frame.parquet").touch()
+
+    proxy = pd.DataFrame({"ETHUSDC-PERP__ETHUSDT-PERP": [0.0]})
+    (tables_dir / "stablecoin_proxy_components.parquet").touch()
+
+    coherence = pd.DataFrame(
+        [
+            {
+                "n_bars": 2,
+                "event_bars": 1,
+                "event_segment_count": 1,
+                "event_segment_median_bars": 1.0,
+                "regime_segment_median_bars": 2.0,
+                "decision_segment_median_bars": 1.0,
+                "decision_flip_rate": 0.5,
+            }
+        ]
+    )
+    coherence.to_csv(tables_dir / "coherence_diagnostics.csv", index=False)
+    return signal, proxy
 
 
 class PresentationPackClaimStatusTests(unittest.TestCase):
@@ -126,6 +166,40 @@ class PresentationPackClaimStatusTests(unittest.TestCase):
             self.assertEqual(claim.loc[0, "positioning"], "performance_outperformance")
             summary = (out / "executive_summary.md").read_text(encoding="utf-8")
             self.assertIn("Performance claim (`improved decision-making`): **supported**", summary)
+
+    def test_pack_reads_parquet_episode_tables_and_exports_coherence_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "reports"
+            out = Path(tmp) / "final"
+            episodes = ["ep_a"]
+            _write_episode_metrics(
+                root,
+                "ep_a",
+                naive_sharpe=0.01,
+                gated_sharpe=0.02,
+                naive_pnl=0.01,
+                gated_pnl=0.02,
+                naive_active_ratio=0.20,
+                gated_active_ratio=0.20,
+            )
+            signal_frame, proxy_frame = _write_signal_proxy_and_coherence(root, "ep_a")
+
+            def _fake_read_parquet(path, *args, **kwargs):
+                p = Path(path)
+                if p.name == "signal_frame.parquet":
+                    return signal_frame.copy()
+                if p.name == "stablecoin_proxy_components.parquet":
+                    return proxy_frame.copy()
+                raise FileNotFoundError(p)
+
+            with patch.object(presentation_pack.pd, "read_parquet", side_effect=_fake_read_parquet):
+                self._run_pack(root, out, episodes)
+
+            summary = (out / "executive_summary.md").read_text(encoding="utf-8")
+            self.assertIn("## On-Chain Validation Snapshot", summary)
+            self.assertIn("## Proxy Coverage Notes", summary)
+            self.assertIn("## Coherence Diagnostics", summary)
+            self.assertTrue((out / "final_coherence_diagnostics.csv").exists())
 
 
 if __name__ == "__main__":

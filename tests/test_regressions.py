@@ -1305,6 +1305,7 @@ class ExportDiagnosticsTests(unittest.TestCase):
             export_outputs(results, run_cfg)
 
             safety_diag = pd.read_csv(tables_dir / "safety_diagnostics.csv")
+            coherence_diag = pd.read_csv(tables_dir / "coherence_diagnostics.csv")
             scope_audit = pd.read_csv(tables_dir / "scope_audit.csv")
             self.assertIn("configured_resample_rule", safety_diag.columns)
             self.assertIn("expected_index_delta", safety_diag.columns)
@@ -1320,6 +1321,11 @@ class ExportDiagnosticsTests(unittest.TestCase):
             self.assertEqual(int(safety_diag.loc[0, "trade_but_trade_signal_false"]), 0)
             self.assertEqual(int(safety_diag.loc[0, "trade_with_entry_threshold_nan"]), 0)
             self.assertEqual(int(safety_diag.loc[0, "trade_with_T_t_nan"]), 0)
+            self.assertIn("event_bars", coherence_diag.columns)
+            self.assertIn("event_segment_count", coherence_diag.columns)
+            self.assertIn("regime_segment_median_bars", coherence_diag.columns)
+            self.assertIn("decision_flip_rate", coherence_diag.columns)
+            self.assertEqual(int(coherence_diag.loc[0, "n_bars"]), len(matrix))
             self.assertIn("requirement_id", scope_audit.columns)
             self.assertIn("status", scope_audit.columns)
             self.assertIn("pass", scope_audit.columns)
@@ -1361,6 +1367,7 @@ class ExportDiagnosticsTests(unittest.TestCase):
             self.assertTrue(Path(exported["edge_net_summary"]).exists())
             self.assertTrue(Path(exported["figure_4"]).exists())
             self.assertTrue(Path(exported["scope_audit"]).exists())
+            self.assertTrue(Path(exported["coherence_diagnostics"]).exists())
 
 
 class DataIngestTimestampTests(unittest.TestCase):

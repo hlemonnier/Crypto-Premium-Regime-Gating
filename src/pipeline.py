@@ -197,6 +197,70 @@ def _build_unifier_artifacts(signal_frame: pd.DataFrame) -> dict[str, pd.DataFra
     }
 
 
+def _segment_lengths(labels: pd.Series, *, fallback_label: str = "unknown") -> pd.DataFrame:
+    series = labels.copy()
+    if series.empty:
+        return pd.DataFrame(columns=["label", "length_bars"])
+    series = series.where(series.notna(), fallback_label).astype(str)
+    segment_id = series.ne(series.shift(1)).cumsum()
+    frame = (
+        pd.DataFrame({"label": series, "segment_id": segment_id})
+        .groupby("segment_id", as_index=False)
+        .agg(label=("label", "first"), length_bars=("label", "size"))
+    )
+    return frame[["label", "length_bars"]]
+
+
+def _build_coherence_diagnostics(signal_frame: pd.DataFrame, metrics: pd.DataFrame) -> pd.DataFrame:
+    n_bars = int(signal_frame.shape[0])
+    event = signal_frame.get("event", pd.Series(False, index=signal_frame.index)).fillna(False).astype(bool)
+    regime = signal_frame.get("regime", pd.Series("unknown", index=signal_frame.index)).astype(str)
+    decision = signal_frame.get("decision", pd.Series("unknown", index=signal_frame.index)).astype(str)
+
+    regime_segments = _segment_lengths(regime, fallback_label="unknown")
+    decision_segments = _segment_lengths(decision, fallback_label="unknown")
+    event_segments = _segment_lengths(event.astype(str), fallback_label="False")
+    event_true_segments = event_segments.loc[event_segments["label"].eq("True"), "length_bars"]
+
+    stress_segments = regime_segments.loc[regime_segments["label"].eq("stress"), "length_bars"]
+    transient_segments = regime_segments.loc[regime_segments["label"].eq("transient"), "length_bars"]
+
+    if decision.empty:
+        decision_flip_count = 0
+    else:
+        decision_flip_count = int(decision.ne(decision.shift(1)).iloc[1:].sum())
+
+    decision_flip_rate = float("nan")
+    if ("gated" in metrics.index) and ("flip_rate" in metrics.columns):
+        decision_flip_rate = float(pd.to_numeric(metrics.loc["gated", "flip_rate"], errors="coerce"))
+    elif n_bars > 1:
+        decision_flip_rate = float(decision_flip_count / float(n_bars - 1))
+
+    row = {
+        "n_bars": n_bars,
+        "event_bars": int(event.sum()),
+        "event_rate": float(event.mean()) if n_bars > 0 else float("nan"),
+        "event_segment_count": int(event_true_segments.shape[0]),
+        "event_segment_mean_bars": float(event_true_segments.mean()) if not event_true_segments.empty else float("nan"),
+        "event_segment_median_bars": float(event_true_segments.median()) if not event_true_segments.empty else float("nan"),
+        "regime_segment_count": int(regime_segments.shape[0]),
+        "regime_segment_mean_bars": float(regime_segments["length_bars"].mean()) if not regime_segments.empty else float("nan"),
+        "regime_segment_median_bars": float(regime_segments["length_bars"].median()) if not regime_segments.empty else float("nan"),
+        "stress_segment_count": int(stress_segments.shape[0]),
+        "stress_segment_mean_bars": float(stress_segments.mean()) if not stress_segments.empty else float("nan"),
+        "stress_segment_median_bars": float(stress_segments.median()) if not stress_segments.empty else float("nan"),
+        "transient_segment_count": int(transient_segments.shape[0]),
+        "transient_segment_mean_bars": float(transient_segments.mean()) if not transient_segments.empty else float("nan"),
+        "transient_segment_median_bars": float(transient_segments.median()) if not transient_segments.empty else float("nan"),
+        "decision_segment_count": int(decision_segments.shape[0]),
+        "decision_segment_mean_bars": float(decision_segments["length_bars"].mean()) if not decision_segments.empty else float("nan"),
+        "decision_segment_median_bars": float(decision_segments["length_bars"].median()) if not decision_segments.empty else float("nan"),
+        "decision_flip_count": decision_flip_count,
+        "decision_flip_rate": decision_flip_rate,
+    }
+    return pd.DataFrame([row])
+
+
 def _build_scope_audit(
     *,
     signal_frame: pd.DataFrame,
@@ -721,6 +785,7 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     signal_path = tables_dir / "signal_frame.parquet"
     proxy_path = tables_dir / "stablecoin_proxy_components.parquet"
     safety_diag_path = tables_dir / "safety_diagnostics.csv"
+    coherence_diag_path = tables_dir / "coherence_diagnostics.csv"
     scope_audit_path = tables_dir / "scope_audit.csv"
     edge_net_curve_path = tables_dir / "edge_net_size_curve.csv"
     break_even_curve_path = tables_dir / "break_even_premium_curve.csv"
@@ -782,6 +847,8 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
         ]
     )
     safety_diag.to_csv(safety_diag_path, index=False)
+    coherence_diag = _build_coherence_diagnostics(signal_frame, metrics)
+    coherence_diag.to_csv(coherence_diag_path, index=False)
 
     unifier_artifacts = _build_unifier_artifacts(signal_frame)
     unifier_artifacts["edge_net_size_curve"].to_csv(edge_net_curve_path, index=False)
@@ -831,6 +898,7 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
         "signal_frame": signal_path,
         "proxy_components": proxy_path,
         "safety_diagnostics": safety_diag_path,
+        "coherence_diagnostics": coherence_diag_path,
         "scope_audit": scope_audit_path,
         "edge_net_size_curve": edge_net_curve_path,
         "break_even_premium_curve": break_even_curve_path,
