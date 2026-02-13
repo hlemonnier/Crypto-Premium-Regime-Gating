@@ -310,7 +310,7 @@ Proxy availability note:
 - when they are unavailable for an episode, pipeline is fail-closed by default (`premium.fail_on_missing_proxy: true`) and the episode is skipped in multi-episode reports
 - if you intentionally disable fail-closed behavior, use that run primarily for depeg safety/on-chain validation and state that debiased premium is not the main signal
 
-## Execution quality diagnostics (slippage proxy + resilience)
+## Execution quality diagnostics (order-book snapshot slippage + resilience)
 
 Bootstrap publicly available execution datasets (orderbook/trades where available) into
 `data/processed/orderbook/<episode>/...`.
@@ -346,7 +346,7 @@ python -m src.execution_data \
 `src.execution_data` also attempts OKX public `priapi` orderbook discovery (module `4`, 400-level L2) by default.
 Disable it with `--disable-okx-priapi-orderbook`.
 
-Build execution diagnostics from `prices_resampled.csv` (price + volume bars):
+Build execution diagnostics (snapshot book-walk when available; explicit fallback otherwise):
 
 ```bash
 python -m src.execution_quality --output-dir reports/final
@@ -354,7 +354,8 @@ python -m src.execution_quality --output-dir reports/final
 
 Coverage behavior:
 
-- by default, diagnostics run in lightweight mode (bar proxy with tick/depth overlays when available), even when L2 coverage is incomplete.
+- by default, diagnostics are snapshot-first: trade-level slippage vs size is computed from `bookDepth` snapshots + tick trades where alignment is available.
+- rows without usable snapshot alignment are kept with explicit `slippage_method=bar_proxy_next_bar_abs_return` fallback.
 - if you need strict fail-closed behavior, pass:
 
 ```bash
@@ -365,17 +366,18 @@ Artifacts:
 
 - `reports/final/execution_l2_coverage.csv`
 - `reports/final/execution_slippage_proxy.csv`
+- `reports/final/execution_slippage_vs_size.csv`
 - `reports/final/execution_cross_quote_comparison.csv`
 - `reports/final/execution_resilience.csv`
 - `reports/final/execution_venue_comparison.csv`
 - `reports/final/execution_quality_report.md`
 
-Method limitation:
+Method notes:
 
-- this is a bar-level proxy (impact/resilience) and does **not** replace order-book snapshot slippage/depth analytics.
-- volatility control is reported via excess and normalized impact proxies (raw bps, excess bps, normalized by local median abs-return).
+- when snapshots are available, slippage is computed via side-aware book-walk interpolation on cumulative depth levels (`±1%..±5%`), plus DNL and queue-pressure proxies.
+- volatility control remains reported via excess and normalized impact fields for compatibility.
 - cross-venue comparison is segmented by `market_type` (`spot` vs `derivatives`) to avoid non-homogeneous venue ranking.
-- do not infer a definitive "best liquidity venue/quote" from this section without L2 order-book replay and instrument/fee/funding normalization.
+- do not infer a definitive "best liquidity venue/quote" without fee/funding/instrument normalization and full replay-grade TCA.
 
 ## Ablation report (single script)
 

@@ -18,6 +18,9 @@ from src.execution_quality import (
     _load_okx_tick_file,
     build_cross_quote_comparison,
     build_l2_coverage,
+    build_slippage_vs_size,
+    build_snapshot_slippage,
+    build_snapshot_trade_frame,
     build_venue_summary,
 )
 from src.hawkes import HawkesConfig, evaluate_hawkes_quality
@@ -1169,6 +1172,81 @@ class ExecutionProxyTests(unittest.TestCase):
         self.assertIn("mean_delta_large_excess_bps", out.columns)
         self.assertIn("n_indeterminate_norm", out.columns)
         self.assertNotIn("usdc_preferred_count", out.columns)
+
+    def test_snapshot_trade_frame_and_slippage_metrics(self) -> None:
+        trades = pd.DataFrame(
+            {
+                "timestamp_utc": pd.to_datetime(
+                    ["2024-03-12 00:00:05Z", "2024-03-12 00:00:10Z"],
+                    utc=True,
+                ),
+                "price": [70000.0, 70010.0],
+                "volume": [7.0, 21.4267],
+                "trade_notional": [500000.0, 1500000.0],
+                "aggressor_side": ["buy", "sell"],
+                "symbol": ["BTCUSDT-PERP", "BTCUSDT-PERP"],
+                "venue": ["binance", "binance"],
+                "episode": ["ep", "ep"],
+                "execution_source": ["trade_ticks", "trade_ticks"],
+                "root": ["BTC", "BTC"],
+                "quote": ["USDT", "USDT"],
+                "suffix": ["PERP", "PERP"],
+                "market_type": ["derivatives", "derivatives"],
+            }
+        )
+        snapshots = pd.DataFrame(
+            {
+                "timestamp_utc": pd.to_datetime(["2024-03-12 00:00:00Z"], utc=True),
+                "symbol": ["BTCUSDT-PERP"],
+                "venue": ["binance"],
+                "ask_notional_1pct": [1_000_000.0],
+                "ask_notional_2pct": [2_000_000.0],
+                "ask_notional_3pct": [3_000_000.0],
+                "ask_notional_4pct": [4_000_000.0],
+                "ask_notional_5pct": [5_000_000.0],
+                "bid_notional_1pct": [1_000_000.0],
+                "bid_notional_2pct": [2_000_000.0],
+                "bid_notional_3pct": [3_000_000.0],
+                "bid_notional_4pct": [4_000_000.0],
+                "bid_notional_5pct": [5_000_000.0],
+            }
+        )
+
+        aligned = build_snapshot_trade_frame(trades, snapshots, snapshot_match_tolerance_sec=120)
+        self.assertEqual(aligned.shape[0], 2)
+        self.assertAlmostEqual(float(aligned.loc[0, "book_walk_bps"]), 50.0, places=9)
+        self.assertAlmostEqual(float(aligned.loc[1, "book_walk_bps"]), 150.0, places=9)
+        self.assertAlmostEqual(float(aligned.loc[0, "dnl"]), 0.5, places=9)
+        self.assertAlmostEqual(float(aligned.loc[1, "dnl"]), 1.5, places=9)
+        self.assertAlmostEqual(float(aligned.loc[1, "queue_load"]), 1.5, places=9)
+
+        slippage = build_snapshot_slippage(aligned)
+        self.assertEqual(slippage.shape[0], 1)
+        self.assertAlmostEqual(float(slippage.loc[0, "impact_all_mean_bps"]), 100.0, places=9)
+        self.assertEqual(str(slippage.loc[0, "slippage_method"]), "orderbook_snapshot_bookwalk")
+
+    def test_slippage_vs_size_builds_quantile_curve(self) -> None:
+        ts = pd.date_range("2024-03-12 00:00:00", periods=30, freq="1s", tz="UTC")
+        dnl = np.linspace(0.1, 3.0, 30)
+        aligned = pd.DataFrame(
+            {
+                "timestamp_utc": ts,
+                "episode": ["ep"] * len(ts),
+                "venue": ["binance"] * len(ts),
+                "market_type": ["derivatives"] * len(ts),
+                "root": ["BTC"] * len(ts),
+                "quote": ["USDT"] * len(ts),
+                "symbol": ["BTCUSDT-PERP"] * len(ts),
+                "snapshot_matched": [True] * len(ts),
+                "dnl": dnl,
+                "book_walk_bps": 100.0 * dnl,
+                "queue_load": 0.5 * dnl,
+            }
+        )
+        curve = build_slippage_vs_size(aligned, n_bins=5)
+        self.assertFalse(curve.empty)
+        self.assertEqual(int(curve["n_obs"].sum()), 30)
+        self.assertLessEqual(int(curve["size_bin"].nunique()), 5)
 
     def test_l2_coverage_reports_missing_when_no_files_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

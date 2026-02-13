@@ -18,6 +18,8 @@ DEFAULT_EPISODES = [
     "yen_followthrough_2024_binance",
 ]
 
+BOOK_LEVEL_PCTS = (1, 2, 3, 4, 5)
+
 # Broader premium/regime study scope (not all episodes have public historical L2).
 PREMIUM_REGIME_EPISODES = [
     "bybit_usdc_depeg_2023",
@@ -52,6 +54,21 @@ SLIPPAGE_COLUMNS = [
     "impact_large_mean_norm",
     "impact_large_median_norm",
     "large_count",
+    "slippage_method",
+    "snapshot_match_ratio",
+    "insufficient_depth_ratio",
+    "book_walk_all_mean_bps",
+    "book_walk_all_median_bps",
+    "book_walk_large_mean_bps",
+    "book_walk_large_median_bps",
+    "dnl_all_mean",
+    "dnl_all_median",
+    "dnl_large_mean",
+    "dnl_large_median",
+    "queue_load_all_mean",
+    "queue_load_all_median",
+    "queue_load_large_mean",
+    "queue_load_large_median",
 ]
 
 COMPARISON_COLUMNS = [
@@ -71,6 +88,16 @@ COMPARISON_COLUMNS = [
     "impact_all_mean_bps_usdc",
     "impact_all_mean_bps_usdt",
     "preferred_quote_on_large_norm",
+    "dnl_large_mean_usdc",
+    "dnl_large_mean_usdt",
+    "dnl_large_delta_usdc_minus_usdt",
+    "queue_load_large_mean_usdc",
+    "queue_load_large_mean_usdt",
+    "queue_load_large_delta_usdc_minus_usdt",
+    "snapshot_match_ratio_usdc",
+    "snapshot_match_ratio_usdt",
+    "slippage_method_usdc",
+    "slippage_method_usdt",
 ]
 
 RESILIENCE_COLUMNS = [
@@ -112,6 +139,23 @@ L2_COVERAGE_COLUMNS = [
     "tick_trades_available",
     "l2_ready",
     "l2_root",
+]
+
+SLIPPAGE_CURVE_COLUMNS = [
+    "episode",
+    "venue",
+    "market_type",
+    "root",
+    "quote",
+    "symbol",
+    "size_bin",
+    "dnl_bin_low",
+    "dnl_bin_high",
+    "n_obs",
+    "dnl_median",
+    "book_walk_mean_bps",
+    "book_walk_median_bps",
+    "queue_load_mean",
 ]
 
 
@@ -460,6 +504,525 @@ def _load_episode_tick_resampled(episode: str, l2_root: Path) -> pd.DataFrame | 
     return _normalize_execution_frame(merged, episode=episode, source="ticks")
 
 
+def _parse_boolean(series: pd.Series) -> pd.Series:
+    lowered = series.astype(str).str.strip().str.lower()
+    return lowered.isin({"1", "true", "t", "yes", "y"})
+
+
+def _load_binance_trade_ticks(path: Path) -> pd.DataFrame:
+    name = path.name
+    match = re.match(r"^(?P<sym>[A-Z0-9]+)-trades-\d{4}-\d{2}-\d{2}\.zip$", name)
+    if match is None:
+        return pd.DataFrame()
+    symbol = str(match.group("sym"))
+
+    chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(
+        path,
+        compression="zip",
+        header=None,
+        usecols=[1, 2, 3, 4, 5],
+        names=["price", "volume", "trade_notional", "timestamp_utc", "is_buyer_maker"],
+        dtype="string",
+        chunksize=500_000,
+    ):
+        part = chunk.copy()
+        part["timestamp_utc"] = pd.to_datetime(
+            pd.to_numeric(part["timestamp_utc"], errors="coerce"),
+            unit="ms",
+            utc=True,
+            errors="coerce",
+        )
+        part["price"] = pd.to_numeric(part["price"], errors="coerce")
+        part["volume"] = pd.to_numeric(part["volume"], errors="coerce").abs()
+        part["trade_notional"] = pd.to_numeric(part["trade_notional"], errors="coerce").abs()
+        maker_flag = _parse_boolean(part["is_buyer_maker"])
+        part["aggressor_side"] = np.where(maker_flag, "sell", "buy")
+        part["symbol"] = f"{symbol}-PERP"
+        part["venue"] = "binance"
+        part = part.dropna(subset=["timestamp_utc", "price", "volume"]).copy()
+        part = part[(part["price"] > 0) & (part["volume"] > 0)].copy()
+        if part.empty:
+            continue
+        fallback_notional = (part["price"] * part["volume"]).abs()
+        part["trade_notional"] = part["trade_notional"].where(part["trade_notional"].gt(0), fallback_notional)
+        part = part.dropna(subset=["trade_notional"]).copy()
+        part = part[part["trade_notional"] > 0].copy()
+        if part.empty:
+            continue
+        chunks.append(
+            part[
+                [
+                    "timestamp_utc",
+                    "price",
+                    "volume",
+                    "trade_notional",
+                    "aggressor_side",
+                    "symbol",
+                    "venue",
+                ]
+            ]
+        )
+
+    if not chunks:
+        return pd.DataFrame()
+    return pd.concat(chunks, ignore_index=True)
+
+
+def _normalize_trade_ticks_frame(frame: pd.DataFrame, *, episode: str, source: str) -> pd.DataFrame:
+    required = ["timestamp_utc", "price", "volume", "symbol", "venue"]
+    normalized = _normalize_execution_frame(frame[required], episode=episode, source=source)
+    if normalized.empty:
+        return normalized
+    extras = frame.loc[normalized.index, ["trade_notional", "aggressor_side"]].copy()
+    normalized["trade_notional"] = pd.to_numeric(extras["trade_notional"], errors="coerce").abs()
+    fallback_notional = (normalized["price"].astype(float) * normalized["volume"].astype(float)).abs()
+    normalized["trade_notional"] = normalized["trade_notional"].where(normalized["trade_notional"].gt(0), fallback_notional)
+    normalized["aggressor_side"] = extras["aggressor_side"].astype(str).str.lower()
+    normalized = normalized[normalized["aggressor_side"].isin(["buy", "sell"])].copy()
+    normalized = normalized.dropna(subset=["trade_notional"]).copy()
+    normalized = normalized[normalized["trade_notional"] > 0].copy()
+    return normalized
+
+
+def _load_episode_trade_ticks(episode: str, l2_root: Path) -> pd.DataFrame | None:
+    episode_root = l2_root / episode
+    if not episode_root.exists():
+        return None
+
+    tables: list[pd.DataFrame] = []
+    for path in sorted(episode_root.rglob("*-trades-*.zip")):
+        if not path.is_file():
+            continue
+        # Snapshot slippage is currently computed where aggressor side is available (Binance trade files).
+        if "binance" not in path.as_posix():
+            continue
+        try:
+            parsed = _load_binance_trade_ticks(path)
+        except Exception:
+            continue
+        if not parsed.empty:
+            tables.append(parsed)
+
+    if not tables:
+        return None
+    merged = pd.concat(tables, ignore_index=True)
+    merged = merged.sort_values(["timestamp_utc", "symbol", "venue"]).reset_index(drop=True)
+    normalized = _normalize_trade_ticks_frame(merged, episode=episode, source="trade_ticks")
+    if normalized.empty:
+        return None
+    return normalized
+
+
+def _load_binance_bookdepth_snapshot_file(path: Path) -> pd.DataFrame:
+    name = path.name
+    match = re.match(r"^(?P<sym>[A-Z0-9]+)-bookDepth-\d{4}-\d{2}-\d{2}\.zip$", name)
+    if match is None:
+        return pd.DataFrame()
+    symbol = str(match.group("sym"))
+
+    chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(
+        path,
+        compression="zip",
+        header=0,
+        usecols=[0, 1, 3],
+        names=["timestamp_utc", "percentage", "notional"],
+        dtype="string",
+        chunksize=500_000,
+    ):
+        part = chunk.copy()
+        part["timestamp_utc"] = pd.to_datetime(
+            part["timestamp_utc"].astype("string"),
+            format="%Y-%m-%d %H:%M:%S",
+            utc=True,
+            errors="coerce",
+        )
+        part["percentage"] = pd.to_numeric(part["percentage"], errors="coerce")
+        part["notional"] = pd.to_numeric(part["notional"], errors="coerce").abs()
+        part = part.dropna(subset=["timestamp_utc", "percentage", "notional"]).copy()
+        part = part[(part["notional"] > 0) & (part["percentage"].abs().isin(list(BOOK_LEVEL_PCTS)))].copy()
+        if part.empty:
+            continue
+        part["symbol"] = f"{symbol}-PERP"
+        part["venue"] = "binance"
+        chunks.append(part[["timestamp_utc", "symbol", "venue", "percentage", "notional"]])
+
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, ignore_index=True)
+    out = out.sort_values(["timestamp_utc", "symbol", "venue", "percentage"]).drop_duplicates(
+        subset=["timestamp_utc", "symbol", "venue", "percentage"],
+        keep="last",
+    )
+    return out.reset_index(drop=True)
+
+
+def _build_bookdepth_snapshot_table(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw.empty:
+        return pd.DataFrame()
+    local = raw.copy()
+    local["side"] = np.where(local["percentage"] > 0, "ask", "bid")
+    local["pct_level"] = local["percentage"].abs().astype(int)
+    local = local[local["pct_level"].isin(BOOK_LEVEL_PCTS)].copy()
+    if local.empty:
+        return pd.DataFrame()
+    pivot = local.pivot_table(
+        index=["timestamp_utc", "symbol", "venue"],
+        columns=["side", "pct_level"],
+        values="notional",
+        aggfunc="last",
+    )
+    if pivot.empty:
+        return pd.DataFrame()
+    pivot.columns = [f"{str(side)}_notional_{int(level)}pct" for side, level in pivot.columns]
+    pivot = pivot.sort_index().reset_index()
+    for side in ("ask", "bid"):
+        side_cols = [f"{side}_notional_{int(level)}pct" for level in BOOK_LEVEL_PCTS]
+        for col in side_cols:
+            if col not in pivot.columns:
+                pivot[col] = np.nan
+        side_data = pivot[side_cols].apply(pd.to_numeric, errors="coerce")
+        side_data = side_data.where(side_data > 0)
+        side_data = side_data.cummax(axis=1)
+        pivot[side_cols] = side_data
+    return pivot.sort_values(["symbol", "timestamp_utc"]).reset_index(drop=True)
+
+
+def _load_episode_bookdepth_snapshots(episode: str, l2_root: Path) -> pd.DataFrame | None:
+    episode_root = l2_root / episode
+    if not episode_root.exists():
+        return None
+    tables: list[pd.DataFrame] = []
+    for path in sorted(episode_root.rglob("*-bookDepth-*.zip")):
+        if not path.is_file():
+            continue
+        try:
+            parsed = _load_binance_bookdepth_snapshot_file(path)
+        except Exception:
+            continue
+        if not parsed.empty:
+            tables.append(parsed)
+    if not tables:
+        return None
+    merged = pd.concat(tables, ignore_index=True)
+    table = _build_bookdepth_snapshot_table(merged)
+    if table.empty:
+        return None
+    return table
+
+
+def _compute_book_walk_bps(
+    trade_notional: np.ndarray,
+    notional_1: np.ndarray,
+    notional_2: np.ndarray,
+    notional_3: np.ndarray,
+    notional_4: np.ndarray,
+    notional_5: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    n1 = np.asarray(notional_1, dtype=float)
+    n2 = np.asarray(notional_2, dtype=float)
+    n3 = np.asarray(notional_3, dtype=float)
+    n4 = np.asarray(notional_4, dtype=float)
+    n5 = np.asarray(notional_5, dtype=float)
+    q = np.asarray(trade_notional, dtype=float)
+
+    walk = np.full(q.shape, np.nan, dtype=float)
+    valid = np.isfinite(q) & (q > 0) & np.isfinite(n1) & (n1 > 0)
+    if not bool(valid.any()):
+        return walk, np.zeros(q.shape, dtype=bool)
+
+    def _segment(mask: np.ndarray, left: np.ndarray, right: np.ndarray, base_bps: float) -> None:
+        denom = right - left
+        seg = mask & np.isfinite(denom) & (denom > 0)
+        if bool(seg.any()):
+            walk[seg] = base_bps + 100.0 * (q[seg] - left[seg]) / denom[seg]
+
+    seg1 = valid & (q <= n1)
+    if bool(seg1.any()):
+        walk[seg1] = 100.0 * q[seg1] / n1[seg1]
+    _segment(valid & (q > n1) & (q <= n2), n1, n2, 100.0)
+    _segment(valid & (q > n2) & (q <= n3), n2, n3, 200.0)
+    _segment(valid & (q > n3) & (q <= n4), n3, n4, 300.0)
+    _segment(valid & (q > n4) & (q <= n5), n4, n5, 400.0)
+    over = valid & (q > n5)
+    _segment(over, n5, n5 + (n5 - n4), 500.0)
+    if bool(over.any()):
+        fallback = over & np.isnan(walk) & np.isfinite(n5) & (n5 > 0)
+        walk[fallback] = 500.0 * q[fallback] / n5[fallback]
+    insufficient = valid & (q > n5)
+    return walk, insufficient
+
+
+def build_snapshot_trade_frame(
+    trades: pd.DataFrame,
+    snapshots: pd.DataFrame,
+    *,
+    snapshot_match_tolerance_sec: int = 300,
+) -> pd.DataFrame:
+    if trades.empty or snapshots.empty:
+        return pd.DataFrame()
+
+    tables: list[pd.DataFrame] = []
+    tolerance = pd.Timedelta(seconds=max(1, int(snapshot_match_tolerance_sec)))
+    for symbol, trade_group in trades.groupby("symbol", sort=False):
+        snap_group = snapshots[snapshots["symbol"] == symbol].copy()
+        if snap_group.empty:
+            unmatched = trade_group.copy()
+            unmatched["snapshot_timestamp_utc"] = pd.NaT
+            tables.append(unmatched)
+            continue
+        g_trade = trade_group.copy()
+        g_snap = snap_group.copy()
+        g_trade["timestamp_utc"] = (
+            pd.to_datetime(g_trade["timestamp_utc"], utc=True, errors="coerce").astype("datetime64[ns, UTC]")
+        )
+        g_snap["timestamp_utc"] = (
+            pd.to_datetime(g_snap["timestamp_utc"], utc=True, errors="coerce").astype("datetime64[ns, UTC]")
+        )
+        g_trade = g_trade.dropna(subset=["timestamp_utc"]).sort_values("timestamp_utc")
+        g_snap = g_snap.dropna(subset=["timestamp_utc"]).sort_values("timestamp_utc")
+        if g_trade.empty or g_snap.empty:
+            continue
+        g_snap = g_snap.rename(columns={"timestamp_utc": "snapshot_timestamp_utc"})
+        merged = pd.merge_asof(
+            g_trade,
+            g_snap,
+            left_on="timestamp_utc",
+            right_on="snapshot_timestamp_utc",
+            by=["symbol", "venue"],
+            direction="backward",
+            tolerance=tolerance,
+        )
+        tables.append(merged)
+
+    if not tables:
+        return pd.DataFrame()
+    aligned = pd.concat(tables, ignore_index=True)
+    aligned["snapshot_matched"] = aligned["snapshot_timestamp_utc"].notna()
+
+    aligned["trade_second"] = pd.DatetimeIndex(aligned["timestamp_utc"]).floor("s")
+    side_flow = (
+        aligned.groupby(["episode", "venue", "symbol", "aggressor_side", "trade_second"], as_index=False)["trade_notional"]
+        .sum()
+        .rename(columns={"trade_notional": "same_second_side_notional"})
+    )
+    aligned = aligned.merge(
+        side_flow,
+        on=["episode", "venue", "symbol", "aggressor_side", "trade_second"],
+        how="left",
+    )
+    aligned["same_second_side_notional"] = pd.to_numeric(aligned["same_second_side_notional"], errors="coerce").abs()
+
+    for level in BOOK_LEVEL_PCTS:
+        ask_col = f"ask_notional_{int(level)}pct"
+        bid_col = f"bid_notional_{int(level)}pct"
+        side_col = f"book_notional_{int(level)}pct"
+        aligned[side_col] = np.where(
+            aligned["aggressor_side"].eq("buy"),
+            pd.to_numeric(aligned.get(ask_col), errors="coerce"),
+            pd.to_numeric(aligned.get(bid_col), errors="coerce"),
+        )
+
+    walk_bps, insufficient = _compute_book_walk_bps(
+        trade_notional=pd.to_numeric(aligned["trade_notional"], errors="coerce").to_numpy(dtype=float),
+        notional_1=pd.to_numeric(aligned["book_notional_1pct"], errors="coerce").to_numpy(dtype=float),
+        notional_2=pd.to_numeric(aligned["book_notional_2pct"], errors="coerce").to_numpy(dtype=float),
+        notional_3=pd.to_numeric(aligned["book_notional_3pct"], errors="coerce").to_numpy(dtype=float),
+        notional_4=pd.to_numeric(aligned["book_notional_4pct"], errors="coerce").to_numpy(dtype=float),
+        notional_5=pd.to_numeric(aligned["book_notional_5pct"], errors="coerce").to_numpy(dtype=float),
+    )
+    aligned["book_walk_bps"] = walk_bps
+    aligned["insufficient_depth"] = insufficient.astype(bool)
+    aligned["dnl"] = aligned["trade_notional"] / aligned["book_notional_1pct"]
+    aligned["linear_baseline_bps"] = 100.0 * aligned["dnl"]
+    aligned["book_walk_excess_bps"] = aligned["book_walk_bps"] - aligned["linear_baseline_bps"]
+    aligned["queue_load"] = aligned["same_second_side_notional"] / aligned["book_notional_1pct"]
+    aligned["rel_size"] = aligned["dnl"]
+    for col in ["book_walk_bps", "dnl", "linear_baseline_bps", "book_walk_excess_bps", "queue_load", "rel_size"]:
+        aligned.loc[~np.isfinite(pd.to_numeric(aligned[col], errors="coerce")), col] = np.nan
+    aligned = aligned.sort_values(["episode", "venue", "symbol", "timestamp_utc"]).reset_index(drop=True)
+    return aligned
+
+
+def build_snapshot_slippage(aligned: pd.DataFrame) -> pd.DataFrame:
+    if aligned.empty:
+        return _empty_table(SLIPPAGE_COLUMNS)
+    rows: list[dict[str, Any]] = []
+    keys = ["episode", "venue", "market_type", "root", "quote", "symbol"]
+    for key, group in aligned.groupby(keys, sort=False):
+        total_obs = int(group.shape[0])
+        valid = group[
+            group["snapshot_matched"].astype(bool)
+            & pd.to_numeric(group["book_walk_bps"], errors="coerce").notna()
+            & pd.to_numeric(group["rel_size"], errors="coerce").notna()
+        ].copy()
+        if valid.empty:
+            continue
+        q90 = float(valid["rel_size"].quantile(0.90))
+        large = valid["rel_size"] >= q90
+        large_count = int(large.sum())
+        rows.append(
+            {
+                "episode": key[0],
+                "venue": key[1],
+                "market_type": key[2],
+                "root": key[3],
+                "quote": key[4],
+                "symbol": key[5],
+                "n_obs": int(valid.shape[0]),
+                "median_volume": float(pd.to_numeric(valid["volume"], errors="coerce").median()),
+                "median_rel_size": float(pd.to_numeric(valid["rel_size"], errors="coerce").median()),
+                "q90_rel_size": q90,
+                "baseline_vol_median_bps": float(pd.to_numeric(valid["linear_baseline_bps"], errors="coerce").median()),
+                "impact_all_mean_bps": float(pd.to_numeric(valid["book_walk_bps"], errors="coerce").mean()),
+                "impact_all_median_bps": float(pd.to_numeric(valid["book_walk_bps"], errors="coerce").median()),
+                "impact_large_mean_bps": (
+                    float(pd.to_numeric(valid.loc[large, "book_walk_bps"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_large_median_bps": (
+                    float(pd.to_numeric(valid.loc[large, "book_walk_bps"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_all_mean_excess_bps": float(pd.to_numeric(valid["book_walk_excess_bps"], errors="coerce").mean()),
+                "impact_all_median_excess_bps": float(
+                    pd.to_numeric(valid["book_walk_excess_bps"], errors="coerce").median()
+                ),
+                "impact_large_mean_excess_bps": (
+                    float(pd.to_numeric(valid.loc[large, "book_walk_excess_bps"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_large_median_excess_bps": (
+                    float(pd.to_numeric(valid.loc[large, "book_walk_excess_bps"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_all_mean_norm": float(pd.to_numeric(valid["dnl"], errors="coerce").mean()),
+                "impact_all_median_norm": float(pd.to_numeric(valid["dnl"], errors="coerce").median()),
+                "impact_large_mean_norm": (
+                    float(pd.to_numeric(valid.loc[large, "dnl"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "impact_large_median_norm": (
+                    float(pd.to_numeric(valid.loc[large, "dnl"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "large_count": large_count,
+                "slippage_method": "orderbook_snapshot_bookwalk",
+                "snapshot_match_ratio": float(valid.shape[0] / total_obs) if total_obs > 0 else np.nan,
+                "insufficient_depth_ratio": float(valid["insufficient_depth"].astype(bool).mean()),
+                "book_walk_all_mean_bps": float(pd.to_numeric(valid["book_walk_bps"], errors="coerce").mean()),
+                "book_walk_all_median_bps": float(pd.to_numeric(valid["book_walk_bps"], errors="coerce").median()),
+                "book_walk_large_mean_bps": (
+                    float(pd.to_numeric(valid.loc[large, "book_walk_bps"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "book_walk_large_median_bps": (
+                    float(pd.to_numeric(valid.loc[large, "book_walk_bps"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "dnl_all_mean": float(pd.to_numeric(valid["dnl"], errors="coerce").mean()),
+                "dnl_all_median": float(pd.to_numeric(valid["dnl"], errors="coerce").median()),
+                "dnl_large_mean": (
+                    float(pd.to_numeric(valid.loc[large, "dnl"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "dnl_large_median": (
+                    float(pd.to_numeric(valid.loc[large, "dnl"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "queue_load_all_mean": float(pd.to_numeric(valid["queue_load"], errors="coerce").mean()),
+                "queue_load_all_median": float(pd.to_numeric(valid["queue_load"], errors="coerce").median()),
+                "queue_load_large_mean": (
+                    float(pd.to_numeric(valid.loc[large, "queue_load"], errors="coerce").mean())
+                    if large_count > 0
+                    else np.nan
+                ),
+                "queue_load_large_median": (
+                    float(pd.to_numeric(valid.loc[large, "queue_load"], errors="coerce").median())
+                    if large_count > 0
+                    else np.nan
+                ),
+            }
+        )
+    if not rows:
+        return _empty_table(SLIPPAGE_COLUMNS)
+    out = pd.DataFrame(rows)
+    for col in SLIPPAGE_COLUMNS:
+        if col not in out.columns:
+            out[col] = np.nan
+    return out[SLIPPAGE_COLUMNS].sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(drop=True)
+
+
+def build_slippage_vs_size(aligned: pd.DataFrame, *, n_bins: int = 10) -> pd.DataFrame:
+    if aligned.empty:
+        return _empty_table(SLIPPAGE_CURVE_COLUMNS)
+    rows: list[dict[str, Any]] = []
+    keys = ["episode", "venue", "market_type", "root", "quote", "symbol"]
+    for key, group in aligned.groupby(keys, sort=False):
+        valid = group[
+            group["snapshot_matched"].astype(bool)
+            & pd.to_numeric(group["dnl"], errors="coerce").notna()
+            & pd.to_numeric(group["book_walk_bps"], errors="coerce").notna()
+        ].copy()
+        if valid.shape[0] < 20:
+            continue
+        bins = min(max(2, int(n_bins)), int(valid["dnl"].nunique()))
+        if bins < 2:
+            continue
+        try:
+            valid["size_bin"] = pd.qcut(valid["dnl"], q=bins, duplicates="drop")
+        except Exception:
+            continue
+        grouped = (
+            valid.groupby("size_bin", observed=False, as_index=False)
+            .agg(
+                n_obs=("dnl", "count"),
+                dnl_median=("dnl", "median"),
+                book_walk_mean_bps=("book_walk_bps", "mean"),
+                book_walk_median_bps=("book_walk_bps", "median"),
+                queue_load_mean=("queue_load", "mean"),
+            )
+            .sort_values("size_bin")
+            .reset_index(drop=True)
+        )
+        for _, row in grouped.iterrows():
+            interval = row["size_bin"]
+            rows.append(
+                {
+                    "episode": key[0],
+                    "venue": key[1],
+                    "market_type": key[2],
+                    "root": key[3],
+                    "quote": key[4],
+                    "symbol": key[5],
+                    "size_bin": str(interval),
+                    "dnl_bin_low": float(interval.left) if hasattr(interval, "left") else np.nan,
+                    "dnl_bin_high": float(interval.right) if hasattr(interval, "right") else np.nan,
+                    "n_obs": int(row["n_obs"]),
+                    "dnl_median": float(row["dnl_median"]),
+                    "book_walk_mean_bps": float(row["book_walk_mean_bps"]),
+                    "book_walk_median_bps": float(row["book_walk_median_bps"]),
+                    "queue_load_mean": float(row["queue_load_mean"]),
+                }
+            )
+    if not rows:
+        return _empty_table(SLIPPAGE_CURVE_COLUMNS)
+    return pd.DataFrame(rows, columns=SLIPPAGE_CURVE_COLUMNS).sort_values(
+        ["episode", "venue", "market_type", "root", "quote", "dnl_bin_low", "dnl_bin_high"]
+    ).reset_index(drop=True)
+
+
 def _load_binance_bookdepth_file(path: Path) -> pd.DataFrame:
     name = path.name
     match = re.match(r"^(?P<sym>[A-Z0-9]+)-bookDepth-\d{4}-\d{2}-\d{2}\.zip$", name)
@@ -654,18 +1217,30 @@ def build_slippage_proxy(enriched: pd.DataFrame) -> pd.DataFrame:
                     else np.nan
                 ),
                 "large_count": large_count,
+                "slippage_method": "bar_proxy_next_bar_abs_return",
             }
         )
 
     if not rows:
         return _empty_table(SLIPPAGE_COLUMNS)
     out = pd.DataFrame(rows)
-    return out.sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(drop=True)
+    for col in SLIPPAGE_COLUMNS:
+        if col not in out.columns:
+            out[col] = np.nan
+    return out[SLIPPAGE_COLUMNS].sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(
+        drop=True
+    )
 
 
 def build_cross_quote_comparison(slippage: pd.DataFrame, *, norm_delta_tolerance: float = 0.05) -> pd.DataFrame:
     if slippage.empty:
         return _empty_table(COMPARISON_COLUMNS)
+
+    def _as_float(row: pd.Series, column: str) -> float:
+        if column not in row.index:
+            return float("nan")
+        value = pd.to_numeric(pd.Series([row[column]]), errors="coerce").iloc[0]
+        return float(value) if pd.notna(value) else float("nan")
 
     rows: list[dict[str, Any]] = []
     for (episode, venue, market_type, root), group in slippage.groupby(
@@ -677,10 +1252,22 @@ def build_cross_quote_comparison(slippage: pd.DataFrame, *, norm_delta_tolerance
 
         usdc = by_quote["USDC"].iloc[0]
         usdt = by_quote["USDT"].iloc[0]
-        delta_raw = float(usdc["impact_large_mean_bps"] - usdt["impact_large_mean_bps"])
-        delta_excess = float(usdc["impact_large_mean_excess_bps"] - usdt["impact_large_mean_excess_bps"])
-        delta_norm = float(usdc["impact_large_mean_norm"] - usdt["impact_large_mean_norm"])
+        usdc_large_raw = _as_float(usdc, "impact_large_mean_bps")
+        usdt_large_raw = _as_float(usdt, "impact_large_mean_bps")
+        usdc_large_excess = _as_float(usdc, "impact_large_mean_excess_bps")
+        usdt_large_excess = _as_float(usdt, "impact_large_mean_excess_bps")
+        usdc_large_norm = _as_float(usdc, "impact_large_mean_norm")
+        usdt_large_norm = _as_float(usdt, "impact_large_mean_norm")
+        delta_raw = float(usdc_large_raw - usdt_large_raw)
+        delta_excess = float(usdc_large_excess - usdt_large_excess)
+        delta_norm = float(usdc_large_norm - usdt_large_norm)
         preferred_norm = _preference_from_delta(delta_norm, tolerance=norm_delta_tolerance)
+        usdc_dnl = _as_float(usdc, "dnl_large_mean")
+        usdt_dnl = _as_float(usdt, "dnl_large_mean")
+        usdc_queue = _as_float(usdc, "queue_load_large_mean")
+        usdt_queue = _as_float(usdt, "queue_load_large_mean")
+        usdc_snapshot_ratio = _as_float(usdc, "snapshot_match_ratio")
+        usdt_snapshot_ratio = _as_float(usdt, "snapshot_match_ratio")
 
         rows.append(
             {
@@ -688,24 +1275,38 @@ def build_cross_quote_comparison(slippage: pd.DataFrame, *, norm_delta_tolerance
                 "venue": venue,
                 "market_type": market_type,
                 "root": root,
-                "impact_large_mean_bps_usdc": float(usdc["impact_large_mean_bps"]),
-                "impact_large_mean_bps_usdt": float(usdt["impact_large_mean_bps"]),
+                "impact_large_mean_bps_usdc": usdc_large_raw,
+                "impact_large_mean_bps_usdt": usdt_large_raw,
                 "impact_large_delta_usdc_minus_usdt_bps": delta_raw,
-                "impact_large_mean_excess_bps_usdc": float(usdc["impact_large_mean_excess_bps"]),
-                "impact_large_mean_excess_bps_usdt": float(usdt["impact_large_mean_excess_bps"]),
+                "impact_large_mean_excess_bps_usdc": usdc_large_excess,
+                "impact_large_mean_excess_bps_usdt": usdt_large_excess,
                 "impact_large_delta_excess_usdc_minus_usdt_bps": delta_excess,
-                "impact_large_mean_norm_usdc": float(usdc["impact_large_mean_norm"]),
-                "impact_large_mean_norm_usdt": float(usdt["impact_large_mean_norm"]),
+                "impact_large_mean_norm_usdc": usdc_large_norm,
+                "impact_large_mean_norm_usdt": usdt_large_norm,
                 "impact_large_delta_norm_usdc_minus_usdt": delta_norm,
-                "impact_all_mean_bps_usdc": float(usdc["impact_all_mean_bps"]),
-                "impact_all_mean_bps_usdt": float(usdt["impact_all_mean_bps"]),
+                "impact_all_mean_bps_usdc": _as_float(usdc, "impact_all_mean_bps"),
+                "impact_all_mean_bps_usdt": _as_float(usdt, "impact_all_mean_bps"),
                 "preferred_quote_on_large_norm": preferred_norm,
+                "dnl_large_mean_usdc": usdc_dnl,
+                "dnl_large_mean_usdt": usdt_dnl,
+                "dnl_large_delta_usdc_minus_usdt": float(usdc_dnl - usdt_dnl),
+                "queue_load_large_mean_usdc": usdc_queue,
+                "queue_load_large_mean_usdt": usdt_queue,
+                "queue_load_large_delta_usdc_minus_usdt": float(usdc_queue - usdt_queue),
+                "snapshot_match_ratio_usdc": usdc_snapshot_ratio,
+                "snapshot_match_ratio_usdt": usdt_snapshot_ratio,
+                "slippage_method_usdc": str(usdc.get("slippage_method", "")),
+                "slippage_method_usdt": str(usdt.get("slippage_method", "")),
             }
         )
 
     if not rows:
         return _empty_table(COMPARISON_COLUMNS)
-    return pd.DataFrame(rows).sort_values(["episode", "venue", "market_type", "root"]).reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    for col in COMPARISON_COLUMNS:
+        if col not in out.columns:
+            out[col] = np.nan
+    return out[COMPARISON_COLUMNS].sort_values(["episode", "venue", "market_type", "root"]).reset_index(drop=True)
 
 
 def build_resilience_table(
@@ -850,6 +1451,18 @@ def parse_args() -> argparse.Namespace:
         default=0.05,
         help="Indifference band for normalized USDC-USDT large-size delta classification.",
     )
+    parser.add_argument(
+        "--snapshot-match-tolerance-sec",
+        type=int,
+        default=300,
+        help="Max backward gap (seconds) when matching trades to orderbook snapshots.",
+    )
+    parser.add_argument(
+        "--size-bins",
+        type=int,
+        default=10,
+        help="Quantile bins for slippage-vs-size summary table.",
+    )
     parser.add_argument("--resilience-horizon", type=int, default=60, help="Forward bars to look for recovery.")
     parser.add_argument("--shock-quantile", type=float, default=0.99, help="Shock threshold quantile.")
     return parser.parse_args()
@@ -863,6 +1476,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     slippage_path = out_dir / "execution_slippage_proxy.csv"
+    slippage_curve_path = out_dir / "execution_slippage_vs_size.csv"
     comparison_path = out_dir / "execution_cross_quote_comparison.csv"
     resilience_path = out_dir / "execution_resilience.csv"
     venue_path = out_dir / "execution_venue_comparison.csv"
@@ -884,6 +1498,7 @@ def main() -> None:
             partial_l2_mode = True
         else:
             _empty_table(SLIPPAGE_COLUMNS).to_csv(slippage_path, index=False)
+            _empty_table(SLIPPAGE_CURVE_COLUMNS).to_csv(slippage_curve_path, index=False)
             _empty_table(COMPARISON_COLUMNS).to_csv(comparison_path, index=False)
             _empty_table(RESILIENCE_COLUMNS).to_csv(resilience_path, index=False)
             _empty_table(VENUE_COLUMNS).to_csv(venue_path, index=False)
@@ -907,6 +1522,7 @@ def main() -> None:
                 handle.write("\n## Artifacts\n\n")
                 handle.write(f"- `{coverage_path}`\n")
                 handle.write(f"- `{slippage_path}`\n")
+                handle.write(f"- `{slippage_curve_path}`\n")
                 handle.write(f"- `{comparison_path}`\n")
                 handle.write(f"- `{resilience_path}`\n")
                 handle.write(f"- `{venue_path}`\n")
@@ -917,11 +1533,23 @@ def main() -> None:
             return
 
     frames: list[pd.DataFrame] = []
+    snapshot_trade_tables: list[pd.DataFrame] = []
     missing: list[str] = []
     for episode in selected_episodes:
         bars = _load_episode_resampled(episode, processed_root)
         ticks = _load_episode_tick_resampled(episode, l2_root)
         depth = _load_episode_bookdepth_minute(episode, l2_root)
+        tick_trades = _load_episode_trade_ticks(episode, l2_root)
+        snapshots = _load_episode_bookdepth_snapshots(episode, l2_root)
+
+        if tick_trades is not None and snapshots is not None and (not tick_trades.empty) and (not snapshots.empty):
+            aligned = build_snapshot_trade_frame(
+                tick_trades,
+                snapshots,
+                snapshot_match_tolerance_sec=args.snapshot_match_tolerance_sec,
+            )
+            if not aligned.empty:
+                snapshot_trade_tables.append(aligned)
 
         has_bars = bars is not None and (not bars.empty)
         has_ticks = ticks is not None and (not ticks.empty)
@@ -957,7 +1585,25 @@ def main() -> None:
         min_size_periods=args.min_size_periods,
         norm_floor_bps=args.norm_floor_bps,
     )
-    slippage = build_slippage_proxy(enriched)
+    proxy_slippage = build_slippage_proxy(enriched)
+    snapshot_trade_frame = (
+        pd.concat(snapshot_trade_tables, ignore_index=True) if snapshot_trade_tables else pd.DataFrame()
+    )
+    snapshot_slippage = build_snapshot_slippage(snapshot_trade_frame)
+    slippage_vs_size = build_slippage_vs_size(snapshot_trade_frame, n_bins=args.size_bins)
+
+    if snapshot_slippage.empty:
+        slippage = proxy_slippage
+    elif proxy_slippage.empty:
+        slippage = snapshot_slippage
+    else:
+        key_cols = ["episode", "venue", "market_type", "root", "quote", "symbol"]
+        snap_keys = snapshot_slippage[key_cols].drop_duplicates()
+        proxy_only = proxy_slippage.merge(snap_keys, on=key_cols, how="left", indicator=True)
+        proxy_only = proxy_only[proxy_only["_merge"] == "left_only"].drop(columns=["_merge"])
+        slippage = pd.concat([snapshot_slippage, proxy_only], ignore_index=True)
+    slippage = slippage.sort_values(["episode", "venue", "market_type", "root", "quote"]).reset_index(drop=True)
+
     comparison = build_cross_quote_comparison(
         slippage,
         norm_delta_tolerance=args.norm_delta_tolerance,
@@ -970,13 +1616,24 @@ def main() -> None:
     venue_summary = build_venue_summary(comparison, resilience)
 
     slippage.to_csv(slippage_path, index=False)
+    slippage_vs_size.to_csv(slippage_curve_path, index=False)
     comparison.to_csv(comparison_path, index=False)
     resilience.to_csv(resilience_path, index=False)
     venue_summary.to_csv(venue_path, index=False)
 
+    snapshot_rows = int((slippage["slippage_method"].astype(str) == "orderbook_snapshot_bookwalk").sum())
+    bar_rows = int((slippage["slippage_method"].astype(str) == "bar_proxy_next_bar_abs_return").sum())
+    used_snapshot_mode = snapshot_rows > 0
+
     with report_path.open("w", encoding="utf-8") as handle:
-        handle.write("# Execution Proxy Diagnostics (Bar-Level)\n\n")
-        handle.write("This report extends stablecoin analysis with bar-level execution proxies.\n\n")
+        if used_snapshot_mode:
+            handle.write("# Execution Diagnostics (Order-Book Snapshot)\n\n")
+            handle.write("This report computes slippage-vs-size from L2 snapshot book-walk metrics.\n\n")
+        else:
+            handle.write("# Execution Proxy Diagnostics (Bar-Level Fallback)\n\n")
+            handle.write(
+                "No usable trade-to-snapshot alignment was available, so diagnostics use bar-level proxy metrics.\n\n"
+            )
         if partial_l2_mode:
             handle.write(
                 "Partial-L2 mode: only episodes with both orderbook+tick coverage were included "
@@ -999,35 +1656,61 @@ def main() -> None:
         handle.write("```text\n")
         handle.write(l2_coverage.to_string(index=False))
         handle.write("\n```\n")
-        handle.write(
-            "\nNote: L2 coverage is provided for transparency. Current diagnostics below remain bar-level proxies.\n"
-        )
+        if used_snapshot_mode:
+            handle.write(
+                "\nSnapshot coverage note: rows with `slippage_method=orderbook_snapshot_bookwalk` use true "
+                "trade-to-orderbook matching; remaining rows are explicit bar-proxy fallback.\n"
+            )
+        else:
+            handle.write("\nL2 coverage is provided for transparency. Diagnostics below are bar-level fallback only.\n")
 
         handle.write("\n## Method Notes\n\n")
-        handle.write(
-            "- Data source: `prices_resampled.csv` bars, with per-minute tick-trade aggregation "
-            "overlays when local `data/processed/orderbook/<episode>/...` trade files are available.\n"
-        )
-        handle.write(
-            "- When Binance `bookDepth` snapshots are available, relative size uses "
-            "`trade_notional / depth_notional_1pct` (fallback to rolling-volume scale otherwise).\n"
-        )
-        handle.write(
-            "- Slippage proxy: next-bar absolute return (bps) conditioned on `rel_size` "
-            "(depth-scaled when available, otherwise volume-scaled).\n"
-        )
-        handle.write(
-            "- Volatility control: report large-size deltas in raw bps, excess bps (`next_bar_abs_ret - local_median_abs_ret`), "
-            "and normalized units (`next_bar_abs_ret / local_median_abs_ret`).\n"
-        )
-        handle.write(f"- Normalization floor: local volatility denominator floored at `{args.norm_floor_bps:.3f}` bps.\n")
-        handle.write("- Large-size bucket: top 10% relative-size bars per symbol.\n")
+        if used_snapshot_mode:
+            handle.write(
+                "- Trade source: Binance tick trades (`*-trades-*.zip`) with aggressor side from `is_buyer_maker`.\n"
+            )
+            handle.write(
+                "- Snapshot source: Binance `bookDepth` snapshots (`*-bookDepth-*.zip`) on `±1..±5%` depth levels.\n"
+            )
+            handle.write(
+                "- Matching: each trade is aligned to the latest snapshot at or before trade time "
+                f"within `{int(args.snapshot_match_tolerance_sec)}` seconds.\n"
+            )
+            handle.write(
+                "- Book-walk slippage (`book_walk_bps`): piecewise interpolation over cumulative notional "
+                "levels (1% to 5%) on the consumed side (asks for buy taker, bids for sell taker).\n"
+            )
+            handle.write(
+                "- DNL (`dnl`): `trade_notional / side_notional_at_1pct`.\n"
+            )
+            handle.write(
+                "- Queue proxy (`queue_load`): same-second side taker notional divided by side 1% notional.\n"
+            )
+            handle.write("- Large-size bucket: top 10% `dnl` per symbol.\n")
+            if bar_rows > 0:
+                handle.write(
+                    f"- Mixed mode: `{bar_rows}` grouped rows fall back to bar-proxy because snapshot matching was unavailable.\n"
+                )
+        else:
+            handle.write(
+                "- Data source: `prices_resampled.csv` bars with per-minute tick overlays where available.\n"
+            )
+            handle.write(
+                "- Slippage proxy: next-bar absolute return (bps) conditioned on relative size (volume/depth proxy).\n"
+            )
+            handle.write(
+                "- Volatility control: excess bps and normalized metrics use local median absolute return "
+                f"(floor `{args.norm_floor_bps:.3f}` bps).\n"
+            )
+            handle.write("- Large-size bucket: top 10% relative-size bars per symbol.\n")
         handle.write("- Resilience proxy: after shock bars (`abs_ret_bps` >= quantile), bars to return to median absolute-return baseline.\n")
-        handle.write(
-            "- Limitation: this is **not** order-book snapshot slippage/depth "
-            "(book-walk, DNL, queueing); it is a trade-bar proxy given available data.\n"
-        )
-        handle.write("- Comparability guardrail: cross-venue tables are segmented by `market_type` (`spot` vs `derivatives`); avoid mixing them for venue ranking.\n")
+        handle.write("- Comparability guardrail: cross-venue tables are segmented by `market_type` (`spot` vs `derivatives`).\n")
+
+        if not slippage_vs_size.empty:
+            handle.write("\n## Slippage vs Size\n\n")
+            handle.write("```text\n")
+            handle.write(slippage_vs_size.to_string(index=False))
+            handle.write("\n```\n")
 
         if not comparison.empty:
             handle.write("\n## Cross-Quote Comparison (USDC vs USDT)\n\n")
@@ -1041,14 +1724,11 @@ def main() -> None:
                 total = int(group.shape[0])
                 handle.write(
                     f"\n- `{market_type}` (normalized delta, tolerance={args.norm_delta_tolerance:.3f}): "
-                    f"USDC lower-proxy-impact `{usdc_better}/{total}`, "
-                    f"USDT lower-proxy-impact `{usdt_better}/{total}`, "
+                    f"USDC lower-impact `{usdc_better}/{total}`, "
+                    f"USDT lower-impact `{usdt_better}/{total}`, "
                     f"indeterminate `{indeterminate}/{total}`.\n"
                 )
-            handle.write(
-                "\nInterpretation guardrail: these are descriptive bar-level proxy gaps only; "
-                "they are insufficient to rank venues for execution quality.\n"
-            )
+            handle.write("\nInterpretation guardrail: these are descriptive diagnostics, not a full fee/funding-adjusted TCA ranking.\n")
 
         if not resilience.empty:
             handle.write("\n## Resilience Summary\n\n")
@@ -1065,6 +1745,7 @@ def main() -> None:
         handle.write("\n## Artifacts\n\n")
         handle.write(f"- `{coverage_path}`\n")
         handle.write(f"- `{slippage_path}`\n")
+        handle.write(f"- `{slippage_curve_path}`\n")
         handle.write(f"- `{comparison_path}`\n")
         handle.write(f"- `{resilience_path}`\n")
         handle.write(f"- `{venue_path}`\n")
@@ -1072,6 +1753,7 @@ def main() -> None:
     print("Execution quality diagnostics completed.")
     print(f"- l2_coverage: {coverage_path}")
     print(f"- slippage_proxy: {slippage_path}")
+    print(f"- slippage_vs_size: {slippage_curve_path}")
     print(f"- cross_quote: {comparison_path}")
     print(f"- resilience: {resilience_path}")
     print(f"- venue_summary: {venue_path}")
