@@ -1,0 +1,2 @@
+claim_id,status,positioning,robust_sharpe_delta_mean,robust_pnl_delta_mean,robust_sharpe_episode_count,robust_pnl_episode_count
+improved_decision_making,not_supported,safety_risk_control,-0.03171133749762002,-0.06733191551799149,4,4

@@ -1,5 +1,5 @@
 episode,exclude_from_robust_aggregate,exclude_reason
-bybit_usdc_depeg_2023,False,
+bybit_usdc_depeg_2023,True,gated_non_comparable_zero_or_low_activity
 march_vol_2024_binance,False,
 okx_usdc_depeg_2023,False,
 yen_followthrough_2024_binance,False,

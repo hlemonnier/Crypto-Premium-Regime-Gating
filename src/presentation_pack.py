@@ -201,6 +201,15 @@ def _plot_metric_comparison(wide: pd.DataFrame, metric: str, out_path: Path) -> 
     plt.close(fig)
 
 
+def _clean_delta(values: pd.Series | None) -> pd.Series:
+    if values is None:
+        return pd.Series(dtype="float64")
+    cleaned = pd.to_numeric(values, errors="coerce").dropna()
+    if cleaned.empty:
+        return pd.Series(dtype="float64")
+    return cleaned.astype(float)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate final polished presentation pack.")
     parser.add_argument("--reports-root", default="reports", help="Root folder containing episode outputs.")
@@ -360,6 +369,8 @@ def main() -> None:
     )
     robust_filter_path = output_dir / "final_robust_filter.csv"
     robust_filter_df.to_csv(robust_filter_path, index=False)
+    robust_sharpe_delta = pd.Series(dtype="float64")
+    robust_pnl_delta = pd.Series(dtype="float64")
 
     md_path = output_dir / "executive_summary.md"
     with md_path.open("w", encoding="utf-8") as handle:
@@ -413,16 +424,17 @@ def main() -> None:
                     )
 
                 if not sharpe_eval.empty:
+                    robust_sharpe_delta = _clean_delta(sharpe_eval)
                     handle.write(
                         f"- Robust mean Sharpe delta (gated - naive): "
-                        f"`{float(sharpe_eval.mean()):.4f}`\n"
+                        f"`{float(robust_sharpe_delta.mean()):.4f}`\n"
                     )
                     handle.write(
                         f"- Robust median Sharpe delta (gated - naive): "
-                        f"`{float(sharpe_eval.median()):.4f}`\n"
+                        f"`{float(robust_sharpe_delta.median()):.4f}`\n"
                     )
 
-                if (not sharpe_eval.empty) and float(sharpe_eval.mean()) > 0:
+                if (not robust_sharpe_delta.empty) and float(robust_sharpe_delta.mean()) > 0:
                     handle.write("- Conclusion (Sharpe): gated improvement is positive on robust aggregate (comparable episodes only).\n")
                 else:
                     handle.write(
@@ -454,21 +466,66 @@ def main() -> None:
                             f"- Robust PnL aggregate exclusions: `{excluded}`\n"
                         )
                 if not pnl_eval.empty:
+                    robust_pnl_delta = _clean_delta(pnl_eval)
                     handle.write(
                         f"- Robust mean PnL delta (gated - naive): "
-                        f"`{float(pnl_eval.mean()):.6f}`\n"
+                        f"`{float(robust_pnl_delta.mean()):.6f}`\n"
                     )
                     handle.write(
                         f"- Robust median PnL delta (gated - naive): "
-                        f"`{float(pnl_eval.median()):.6f}`\n"
+                        f"`{float(robust_pnl_delta.median()):.6f}`\n"
                     )
 
-                if (not pnl_eval.empty) and float(pnl_eval.mean()) > 0:
+                if (not robust_pnl_delta.empty) and float(robust_pnl_delta.mean()) > 0:
                     handle.write("- Conclusion (PnL): gated improvement is positive on robust aggregate (comparable episodes only).\n")
                 else:
                     handle.write(
                         "- Conclusion (PnL): gated improvement is **not** demonstrated on robust aggregate (comparable episodes only).\n"
                     )
+
+        sharpe_supported = (not robust_sharpe_delta.empty) and float(robust_sharpe_delta.mean()) > 0.0
+        pnl_supported = (not robust_pnl_delta.empty) and float(robust_pnl_delta.mean()) > 0.0
+        performance_claim_supported = sharpe_supported and pnl_supported
+        claim_status_path = output_dir / "claim_status.csv"
+        claim_status_df = pd.DataFrame(
+            [
+                {
+                    "claim_id": "improved_decision_making",
+                    "status": "supported" if performance_claim_supported else "not_supported",
+                    "positioning": "performance_outperformance" if performance_claim_supported else "safety_risk_control",
+                    "robust_sharpe_delta_mean": float(robust_sharpe_delta.mean()) if not robust_sharpe_delta.empty else np.nan,
+                    "robust_pnl_delta_mean": float(robust_pnl_delta.mean()) if not robust_pnl_delta.empty else np.nan,
+                    "robust_sharpe_episode_count": int(robust_sharpe_delta.shape[0]),
+                    "robust_pnl_episode_count": int(robust_pnl_delta.shape[0]),
+                }
+            ]
+        )
+        claim_status_df.to_csv(claim_status_path, index=False)
+
+        handle.write("\n## Claim Status\n\n")
+        if performance_claim_supported:
+            handle.write(
+                "- Performance claim (`improved decision-making`): **supported** on robust aggregate "
+                "(comparable episodes only).\n"
+            )
+            handle.write(
+                "- Positioning: outperformance framing is allowed because both robust Sharpe and robust PnL "
+                "deltas are positive.\n"
+            )
+        else:
+            handle.write(
+                "- Performance claim (`improved decision-making`): **not supported** by current robust aggregate "
+                "(comparable episodes only).\n"
+            )
+            handle.write(
+                "- Positioning: present this build as a safety/risk-control gating framework under calibration, "
+                "not as a proven outperformance strategy.\n"
+            )
+            handle.write(
+                "- Promotion rule: only switch to outperformance messaging when both robust mean Sharpe delta "
+                "and robust mean PnL delta are strictly positive.\n"
+            )
+        handle.write(f"- Machine-readable claim status export: `{claim_status_path}`.\n")
 
         if not onchain_df.empty:
             handle.write("\n## On-Chain Validation Snapshot\n\n")
@@ -568,6 +625,7 @@ def main() -> None:
         handle.write(f"- `{figures_dir / 'sharpe_naive_vs_gated.png'}`\n")
         handle.write(f"- `{figures_dir / 'pnl_naive_vs_gated.png'}`\n")
         handle.write(f"- `{figures_dir / 'fliprate_naive_vs_gated.png'}`\n")
+        handle.write(f"- `{claim_status_path}`\n")
         if not onchain_df.empty:
             handle.write(f"- `{onchain_path}`\n")
         if not proxy_df.empty:
@@ -608,6 +666,7 @@ def main() -> None:
     print(f"- metrics_wide: {wide_path}")
     if not onchain_df.empty:
         print(f"- onchain_snapshot: {onchain_path}")
+    print(f"- claim_status: {claim_status_path}")
     print(f"- summary: {md_path}")
 
 

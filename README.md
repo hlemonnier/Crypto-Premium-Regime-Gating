@@ -1,9 +1,6 @@
 # Crypto Premium Regime Gating (Hiring Project)
 
-This repository implements the v5 framework described in `AGENTS.md`, with:
-
-- `Notice.pdf` (baseline: premium + stat-mech + regime gating)
-- `Notice + Hawkes.pdf` (optional Hawkes overlay)
+This repository implements the premium regime gating framework described in `AGENTS.md`.
 
 ## Quickstart (what the reviewer needs)
 
@@ -29,9 +26,8 @@ Main outputs after pipeline run:
 Top-level:
 
 - `README.md`: runbook
-- `AGENTS.md`: v5 project spec
+- `AGENTS.md`: project spec
 - `AGENT.md`: coding guide used during implementation
-- `Notice.pdf`, `Notice + Hawkes.pdf`: reference notes
 - `requirements.txt`: pinned dependencies
 - `configs/config.yaml`: default runtime config
 - `src/`: implementation
@@ -128,7 +124,7 @@ Robustness defaults:
 
 Strategy gating default:
 
-- `strategy.strict_notice_gating: true` enforces Notice-style hard precondition before `Trade`: `|m_t| > entry_k * T_t * sigma_hat`.
+- `strategy.strict_notice_gating: true` enforces a hard precondition before `Trade`: `|m_t| > entry_k * T_t * sigma_hat`.
 
 Packaging helpers:
 
@@ -165,4 +161,3 @@ Pipeline output files (default):
 ## Where to read deeper details
 
 - Full quantitative policy, defaults, and definitions: `AGENTS.md`
-- Original project notes: `Notice.pdf`, `Notice + Hawkes.pdf`

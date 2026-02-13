@@ -1,6 +1,6 @@
-# AGENT.md - Coding Guide (Fasanara Premiums v5)
+# AGENT.md - Coding Guide (Fasanara Premiums)
 
-This file is a coding reference spec for implementing the v5 project quickly and reproducibly.
+This file is a coding reference spec for implementing the project quickly and reproducibly.
 It is written to be usable by a human or an AI agent while coding.
 
 ## 0) Goal (definition of done)

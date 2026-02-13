@@ -27,12 +27,26 @@ Metric convention: `sharpe` is full-series and non-annualized. Annualized Sharpe
 - Raw median Sharpe delta (gated - naive, full-series non-annualized): `-0.0288`
 - Raw episodes with Sharpe improvement: `1/5`
 - Raw episodes with Sharpe degradation: `4/5`
-- Conclusion (Sharpe): gated improvement is **not** demonstrated on robust aggregate.
+- Robust Sharpe aggregate exclusions: `['bybit_usdc_depeg_2023']`
+- Non-comparable episodes (gated inactive/low activity <= 0.01 active ratio): `['bybit_usdc_depeg_2023']`
+- Robust mean Sharpe delta (gated - naive): `-0.0317`
+- Robust median Sharpe delta (gated - naive): `-0.0295`
+- Conclusion (Sharpe): gated improvement is **not** demonstrated on robust aggregate (comparable episodes only).
 - Raw mean PnL delta (gated - naive): `-0.046144`
 - Raw median PnL delta (gated - naive): `-0.003324`
 - Raw episodes with PnL improvement: `1/5`
 - Raw episodes with PnL degradation: `4/5`
-- Conclusion (PnL): gated improvement is **not** demonstrated on robust aggregate.
+- Robust PnL aggregate exclusions: `['bybit_usdc_depeg_2023']`
+- Robust mean PnL delta (gated - naive): `-0.067332`
+- Robust median PnL delta (gated - naive): `-0.004162`
+- Conclusion (PnL): gated improvement is **not** demonstrated on robust aggregate (comparable episodes only).
+
+## Claim Status
+
+- Performance claim (`improved decision-making`): **not supported** by current robust aggregate (comparable episodes only).
+- Positioning: present this build as a safety/risk-control gating framework under calibration, not as a proven outperformance strategy.
+- Promotion rule: only switch to outperformance messaging when both robust mean Sharpe delta and robust mean PnL delta are strictly positive.
+- Machine-readable claim status export: `reports/final/claim_status.csv`.
 
 ## On-Chain Validation Snapshot
 
@@ -106,6 +120,7 @@ Decision guardrail: do not conclude 'better liquidity' without L2 order-book rep
 - `reports/final/figures/sharpe_naive_vs_gated.png`
 - `reports/final/figures/pnl_naive_vs_gated.png`
 - `reports/final/figures/fliprate_naive_vs_gated.png`
+- `reports/final/claim_status.csv`
 - `reports/final/final_onchain_snapshot.csv`
 - `reports/final/final_proxy_coverage.csv`
 - `reports/final/final_pnl_localization.csv`
