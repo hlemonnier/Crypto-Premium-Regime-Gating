@@ -702,6 +702,35 @@ class StrategyFallbackThresholdTests(unittest.TestCase):
         self.assertTrue(float(out["entry_threshold"].iloc[-1]) < 0.05)
         self.assertEqual(str(out["decision"].iloc[-1]), "Trade")
 
+    def test_notice_style_trade_implies_trade_signal_when_strict_mode_enabled(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=6, freq="1min", tz="UTC")
+        m_t = pd.Series([0.0, 0.004, 0.009, 0.015, -0.02, 0.003], index=idx, name="m_t")
+        T_t = pd.Series(1.0, index=idx, name="T_t")
+        chi_t = pd.Series(0.0, index=idx, name="chi_t")
+        sigma_hat = pd.Series(0.01, index=idx, name="sigma_hat")
+        regime = pd.Series("transient", index=idx, name="regime")
+        depeg_flag = pd.Series(False, index=idx, name="depeg_flag")
+        cfg = StrategyConfig(
+            entry_k=1.0,
+            strict_notice_gating=True,
+            threshold_min_periods=10_000,
+        )
+
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=sigma_hat,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            cfg=cfg,
+        )
+
+        trade = out["decision"].astype(str).eq("Trade")
+        trade_signal = out["trade_signal"].astype(bool)
+        self.assertTrue(bool(trade.any()))
+        self.assertFalse(bool((trade & ~trade_signal).any()))
+
 
 class StressSourceDecisionTests(unittest.TestCase):
     def test_stress_sources_drive_different_actions(self) -> None:
@@ -932,6 +961,46 @@ class ExecutionUnifierTests(unittest.TestCase):
         )
         self.assertFalse(bool(high_cost["decision"].astype(str).eq("Trade").any()))
         self.assertTrue(bool(low_cost["decision"].astype(str).eq("Trade").any()))
+
+    def test_unifier_trade_edge_buffer_reduces_trade_count(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        cfg = StrategyConfig(entry_k=1.0, threshold_min_periods=10_000)
+
+        no_buffer = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(
+                enabled=True,
+                spread_roundtrip_bps=0.0,
+                fees_roundtrip_bps=0.0,
+                fallback_linear_slippage_bps=0.01,
+                trade_edge_buffer_bps=0.0,
+            ),
+            cfg=cfg,
+        )
+        buffered = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(
+                enabled=True,
+                spread_roundtrip_bps=0.0,
+                fees_roundtrip_bps=0.0,
+                fallback_linear_slippage_bps=0.01,
+                trade_edge_buffer_bps=0.3,
+            ),
+            cfg=cfg,
+        )
+        no_buffer_trades = int(no_buffer["decision"].astype(str).eq("Trade").sum())
+        buffered_trades = int(buffered["decision"].astype(str).eq("Trade").sum())
+        self.assertGreater(no_buffer_trades, buffered_trades)
 
     def test_unifier_trade_requires_entry_signal_and_finite_threshold(self) -> None:
         premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()

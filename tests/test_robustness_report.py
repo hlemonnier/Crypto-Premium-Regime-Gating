@@ -14,10 +14,12 @@ import yaml
 from src.ablation_core import FactorialVariant, build_factorial_variants, compute_core_frames
 from src.pipeline import load_config
 from src.robustness_report import (
+    apply_default_episode_filters,
     apply_latency_one_bar,
     build_variant_payload,
     build_walkforward_splits,
     compute_strict_verdict_table,
+    filter_compatible_matrices,
     scenario_costs,
 )
 
@@ -54,6 +56,54 @@ def _make_synthetic_matrix(*, start: str, periods: int, seed: int) -> pd.DataFra
 
 
 class RobustnessReportTests(unittest.TestCase):
+    def test_default_episode_filter_excludes_smoke(self) -> None:
+        files = [
+            Path("data/processed/episodes/smoke_2024_08_05/prices_matrix.csv"),
+            Path("data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv"),
+        ]
+        kept, dropped = apply_default_episode_filters(files, include_smoke=False)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(len(dropped), 1)
+        self.assertIn("smoke_2024_08_05", str(dropped[0]))
+
+    def test_default_episode_filter_can_include_smoke(self) -> None:
+        files = [
+            Path("data/processed/episodes/smoke_2024_08_05/prices_matrix.csv"),
+            Path("data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv"),
+        ]
+        kept, dropped = apply_default_episode_filters(files, include_smoke=True)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(len(dropped), 0)
+
+    def test_filter_compatible_matrices_returns_structured_reason(self) -> None:
+        cfg = deepcopy(load_config("configs/config.yaml"))
+        cfg.setdefault("onchain", {})
+        cfg["onchain"]["enabled"] = False
+        cfg.setdefault("premium", {})
+        cfg["premium"]["allow_synthetic_usdc_from_usdt"] = False
+
+        good = _make_synthetic_matrix(start="2024-02-01", periods=180, seed=11)
+        idx = pd.date_range("2024-02-01", periods=180, freq="1min", tz="UTC")
+        bad = pd.DataFrame(
+            {
+                "BTCUSDT-PERP": np.linspace(50_000.0, 50_100.0, len(idx)),
+            },
+            index=idx,
+        )
+
+        compatible, skipped = filter_compatible_matrices(
+            cfg,
+            {
+                "good_ep": good,
+                "bad_ep": bad,
+            },
+        )
+
+        self.assertIn("good_ep", compatible)
+        self.assertIn("bad_ep", skipped)
+        self.assertEqual(str(skipped["bad_ep"].get("reason_code")), "missing_target_pair")
+        self.assertTrue(bool(str(skipped["bad_ep"].get("reason", "")).strip()))
+
     def test_factorial_variants_are_exhaustive_and_unique(self) -> None:
         variants = build_factorial_variants()
         self.assertEqual(len(variants), 16)
@@ -206,6 +256,56 @@ class RobustnessReportTests(unittest.TestCase):
             ]
             for path in expected:
                 self.assertTrue(path.exists(), f"missing {path}")
+
+    def test_tune_gating_cli_gracefully_skips_all_incompatible_episodes(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            episodes_dir = tmp_path / "episodes"
+            (episodes_dir / "bad_ep").mkdir(parents=True, exist_ok=True)
+
+            idx = pd.date_range("2024-03-01", periods=180, freq="1min", tz="UTC")
+            bad = pd.DataFrame(
+                {
+                    "BTCUSDT-PERP": np.linspace(50_000.0, 50_200.0, len(idx)),
+                },
+                index=idx,
+            )
+            bad.to_csv(episodes_dir / "bad_ep" / "prices_matrix.csv", index=True, index_label="timestamp_utc")
+
+            cfg = deepcopy(load_config("configs/config.yaml"))
+            cfg.setdefault("onchain", {})
+            cfg["onchain"]["enabled"] = False
+            cfg.setdefault("premium", {})
+            cfg["premium"]["allow_synthetic_usdc_from_usdt"] = False
+            config_path = tmp_path / "config.yaml"
+            with config_path.open("w", encoding="utf-8") as handle:
+                yaml.safe_dump(cfg, handle, sort_keys=False)
+
+            out_path = tmp_path / "gating_tuning.csv"
+            cmd = [
+                sys.executable,
+                "-m",
+                "src.tune_gating",
+                "--config",
+                str(config_path),
+                "--episodes",
+                str(episodes_dir / "*" / "prices_matrix.csv"),
+                "--output",
+                str(out_path),
+            ]
+            subprocess.run(cmd, cwd=repo_root, check=True)
+
+            self.assertTrue(out_path.exists())
+            status = pd.read_csv(out_path)
+            self.assertEqual(str(status.loc[0, "run_status"]), "skipped")
+            self.assertEqual(str(status.loc[0, "run_skip_reason_code"]), "no_compatible_episodes")
+
+            skipped_path = out_path.with_name(f"{out_path.stem}_compatibility_skipped.csv")
+            self.assertTrue(skipped_path.exists())
+            skipped = pd.read_csv(skipped_path)
+            self.assertIn("reason_code", skipped.columns)
+            self.assertTrue(bool(skipped["reason_code"].astype(str).eq("missing_target_pair").any()))
 
 
 if __name__ == "__main__":

@@ -94,6 +94,7 @@ hawkes:
   quality_min_fit_ok_ratio: 0.2
 strategy:
   entry_k: 1.0
+  strict_notice_gating: true
   t_widen_quantile: 0.97
   chi_widen_quantile: 0.99
   confidence_floor: 0.1
@@ -123,7 +124,8 @@ execution_unifier:
   horizon_default_bars: 20
   horizon_estimation_min_obs: 30
   size_grid_step: 0.05
-  trade_min_size: 0.1
+  trade_min_size: 0.2
+  trade_edge_buffer_bps: 0.1
   widen_floor_size: 0.25
   spread_roundtrip_bps:
   fees_roundtrip_bps:

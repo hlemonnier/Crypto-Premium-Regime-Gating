@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timezone
 import glob
 from pathlib import Path
 import random
@@ -23,7 +22,14 @@ from src.backtest import BacktestConfig, run_backtest
 from src.hawkes import HawkesConfig, estimate_hawkes_rolling, evaluate_hawkes_quality
 from src.pipeline import load_config, load_price_matrix, run_pipeline
 from src.strategy import ExecutionUnifierConfig, StrategyConfig, build_decisions
-from src.tune_gating import CandidateGrid, build_param_grid, evaluate_dataset, parse_float_list
+from src.tune_gating import (
+    CandidateGrid,
+    build_param_grid,
+    classify_compatibility_reason,
+    compatibility_skip_table,
+    evaluate_dataset,
+    parse_float_list,
+)
 
 SCENARIO_ORDER = ["base", "fees_x2", "spread_x2", "latency_1bar", "liquidity_half", "combined_worst"]
 SINGLE_STRESS_SCENARIOS = ["fees_x2", "spread_x2", "latency_1bar", "liquidity_half"]
@@ -33,6 +39,7 @@ REFERENCE_VARIANT_ID = FactorialVariant(
     statmech=True,
     hawkes=True,
 ).variant_id
+SMOKE_TOKENS = ("smoke",)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,8 +57,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-train-episodes",
         type=int,
-        default=1,
+        default=2,
         help="Minimum train episode count for walk-forward splits.",
+    )
+    parser.add_argument(
+        "--include-smoke",
+        action="store_true",
+        help="Include smoke episodes (excluded by default).",
     )
     parser.add_argument("--entry-k", default="0.5,0.75,1.0,1.25", help="Candidate list.")
     parser.add_argument("--t-widen", default="0.95,0.97,0.99", help="Candidate list.")
@@ -77,6 +89,23 @@ def resolve_episode_files(patterns: list[str]) -> list[Path]:
     if not deduped:
         raise FileNotFoundError(f"No episode files matched patterns: {patterns}")
     return deduped
+
+
+def _is_smoke_episode(path: Path) -> bool:
+    lowered = path.as_posix().lower()
+    return any(token in lowered for token in SMOKE_TOKENS)
+
+
+def apply_default_episode_filters(
+    files: list[Path],
+    *,
+    include_smoke: bool,
+) -> tuple[list[Path], list[Path]]:
+    if include_smoke:
+        return list(files), []
+    kept = [path for path in files if not _is_smoke_episode(path)]
+    dropped = [path for path in files if _is_smoke_episode(path)]
+    return kept, dropped
 
 
 def _matrix_start_end(matrix: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -150,17 +179,88 @@ def _load_matrices(files: list[Path], config: dict[str, Any]) -> dict[str, pd.Da
 def filter_compatible_matrices(
     base_config: dict[str, Any],
     matrices: dict[str, pd.DataFrame],
-) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+) -> tuple[dict[str, pd.DataFrame], dict[str, dict[str, str]]]:
     compatible: dict[str, pd.DataFrame] = {}
-    skipped: dict[str, str] = {}
+    skipped: dict[str, dict[str, str]] = {}
     for path, matrix in matrices.items():
         try:
-            run_pipeline(base_config, matrix)
+            results = run_pipeline(base_config, matrix)
         except Exception as exc:
-            skipped[path] = str(exc).replace("\n", " ")
+            skipped[path] = classify_compatibility_reason(exc)
             continue
+        metrics = results.get("metrics")
+        if isinstance(metrics, pd.DataFrame) and ("gated" in metrics.index):
+            gated = metrics.loc["gated"]
+            degenerate_raw = float(pd.to_numeric(gated.get("degenerate_no_trade"), errors="coerce"))
+            comparable_raw = float(pd.to_numeric(gated.get("comparable_vs_naive"), errors="coerce"))
+            degenerate_no_trade = int(degenerate_raw) if np.isfinite(degenerate_raw) else 0
+            comparable_vs_naive = int(comparable_raw) if np.isfinite(comparable_raw) else 0
+            if degenerate_no_trade > 0 or comparable_vs_naive <= 0:
+                skipped[path] = {
+                    "reason_code": "degenerate_strategy",
+                    "reason": (
+                        "Gated strategy produced degenerate/non-comparable outputs for this episode "
+                        f"(degenerate_no_trade={degenerate_no_trade}, comparable_vs_naive={comparable_vs_naive})."
+                    ),
+                }
+                continue
         compatible[path] = matrix
     return compatible, skipped
+
+
+def _write_graceful_compatibility_outputs(
+    *,
+    output_dir: Path,
+    skipped: dict[str, dict[str, str]],
+    reason_code: str,
+    reason: str,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    walkforward_df = pd.DataFrame()
+    ablation_df = pd.DataFrame()
+    stress_df = pd.DataFrame()
+    verdict_df = pd.DataFrame(columns=["split_id", "test_episode", "variant_id", "verdict_pass"])
+    calibration_df = pd.DataFrame()
+
+    walkforward_path = output_dir / "walkforward_split_metrics.csv"
+    ablation_path = output_dir / "ablation_factorial_oos.csv"
+    stress_path = output_dir / "stress_matrix_oos.csv"
+    verdict_path = output_dir / "robustness_verdict.csv"
+    calibration_path = output_dir / "walkforward_calibration_details.csv"
+
+    walkforward_df.to_csv(walkforward_path, index=False)
+    ablation_df.to_csv(ablation_path, index=False)
+    stress_df.to_csv(stress_path, index=False)
+    verdict_df.to_csv(verdict_path, index=False)
+    calibration_df.to_csv(calibration_path, index=False)
+
+    skip_table = compatibility_skip_table(skipped)
+    run_row = pd.DataFrame(
+        [{"matrix_path": "__RUN__", "reason_code": str(reason_code), "reason": str(reason)}]
+    )
+    skip_table = pd.concat([skip_table, run_row], axis=0, ignore_index=True)
+    skipped_path = output_dir / "compatibility_skipped.csv"
+    skip_table.to_csv(skipped_path, index=False)
+
+    summary_path = _write_summary_markdown(
+        output_dir=output_dir,
+        walkforward_df=walkforward_df,
+        ablation_df=ablation_df,
+        stress_df=stress_df,
+        verdict_df=verdict_df,
+    )
+
+    print("Robustness sweep skipped gracefully.")
+    print(f"- reason_code: {reason_code}")
+    print(f"- reason: {reason}")
+    print(f"- walkforward_split_metrics: {walkforward_path}")
+    print(f"- ablation_factorial_oos: {ablation_path}")
+    print(f"- stress_matrix_oos: {stress_path}")
+    print(f"- robustness_verdict: {verdict_path}")
+    print(f"- calibration_details: {calibration_path}")
+    print(f"- compatibility_skipped: {skipped_path}")
+    print(f"- summary: {summary_path}")
 
 
 def _apply_combo(base_config: dict[str, Any], combo: dict[str, float]) -> dict[str, Any]:
@@ -182,6 +282,34 @@ def _calibrate_split(
     combos: list[dict[str, float]],
     min_active_ratio: float,
 ) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any]]:
+    def _num_col(table: pd.DataFrame, name: str, *, default: float = 0.0) -> pd.Series:
+        if name not in table.columns:
+            return pd.Series(float(default), index=table.index, dtype="float64")
+        return pd.to_numeric(table[name], errors="coerce").fillna(float(default))
+
+    def _robust_calibration_score(table: pd.DataFrame) -> pd.Series:
+        base_score = _num_col(table, "train_score")
+        mean_sharpe = _num_col(table, "train_mean_sharpe_full_raw")
+        mean_pnl = _num_col(table, "train_mean_pnl_net")
+        mean_turnover = _num_col(table, "train_mean_turnover")
+        min_sharpe = _num_col(table, "train_min_sharpe_full_raw")
+        mean_active = _num_col(table, "train_mean_active_ratio")
+
+        downside_min_sharpe = (-min_sharpe).clip(lower=0.0)
+        over_active = (mean_active - 0.30).clip(lower=0.0)
+        negative_pnl = (-mean_pnl).clip(lower=0.0)
+
+        score = (
+            base_score
+            + (30.0 * mean_pnl)
+            + (0.50 * mean_sharpe)
+            - (0.004 * mean_turnover)
+            - (2.0 * downside_min_sharpe)
+            - (0.20 * over_active)
+            - (80.0 * negative_pnl)
+        )
+        return score.rename("train_robust_score")
+
     rows: list[dict[str, Any]] = []
     for combo in combos:
         stats = evaluate_dataset(
@@ -194,8 +322,9 @@ def _calibrate_split(
         rows.append({**combo, **stats})
 
     table = pd.DataFrame(rows)
+    table["train_robust_score"] = _robust_calibration_score(table)
     table = table.sort_values(
-        ["train_score", "train_mean_sharpe_full_raw", "train_mean_pnl_net"],
+        ["train_robust_score", "train_mean_pnl_net", "train_mean_sharpe_full_raw", "train_score"],
         ascending=False,
     ).reset_index(drop=True)
     best = table.iloc[0].to_dict()
@@ -666,6 +795,7 @@ def _summarize_walkforward_row(
         "selected_chi_widen_quantile": float(best["chi_widen_quantile"]),
         "selected_stress_quantile": float(best["stress_quantile"]),
         "selected_recovery_quantile": float(best["recovery_quantile"]),
+        "selected_train_robust_score": float(best["train_robust_score"]),
         "train_score": float(best["train_score"]),
         "train_mean_sharpe_full_raw": float(best["train_mean_sharpe_full_raw"]),
         "train_mean_pnl_net": float(best["train_mean_pnl_net"]),
@@ -729,19 +859,38 @@ def _write_summary_markdown(
 def main() -> None:
     args = parse_args()
     base_config = load_config(args.config)
+    output_dir = Path(args.output_dir)
 
     files = resolve_episode_files(args.episodes)
+    files, dropped = apply_default_episode_filters(
+        files,
+        include_smoke=bool(args.include_smoke),
+    )
+    if dropped:
+        print(f"Excluded smoke episodes by default: {len(dropped)}")
+        for path in dropped:
+            print(f"- {path}")
+    if not files:
+        raise RuntimeError("No episode files available after applying default filters.")
+
     all_matrices = _load_matrices(files, base_config)
     compatible, skipped = filter_compatible_matrices(base_config, all_matrices)
     if skipped:
         print("Skipped incompatible episodes:")
-        for path, reason in skipped.items():
-            print(f"- {path}: {reason}")
+        for path, detail in skipped.items():
+            print(f"- {path} [{detail.get('reason_code', 'pipeline_error')}]: {detail.get('reason', '')}")
     if len(compatible) < max(2, int(args.min_train_episodes) + 1):
-        raise RuntimeError(
+        reason = (
             "Not enough compatible episodes for walk-forward. "
             f"compatible={len(compatible)} min_required={max(2, int(args.min_train_episodes) + 1)}"
         )
+        _write_graceful_compatibility_outputs(
+            output_dir=output_dir,
+            skipped=skipped,
+            reason_code="insufficient_compatible_episodes",
+            reason=reason,
+        )
+        return
 
     sorted_items = _sort_matrix_items(compatible)
     splits = build_walkforward_splits(
@@ -749,7 +898,14 @@ def main() -> None:
         min_train_episodes=int(args.min_train_episodes),
     )
     if not splits:
-        raise RuntimeError("No walk-forward split generated.")
+        reason = "No walk-forward split generated after compatibility filtering."
+        _write_graceful_compatibility_outputs(
+            output_dir=output_dir,
+            skipped=skipped,
+            reason_code="no_walkforward_splits",
+            reason=reason,
+        )
+        return
 
     grid = CandidateGrid(
         entry_k=parse_float_list(args.entry_k),
@@ -812,7 +968,6 @@ def main() -> None:
     verdict_df = compute_strict_verdict_table(stress_df)
     stress_df["scenario"] = stress_df["scenario"].astype(str)
 
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     walkforward_path = output_dir / "walkforward_split_metrics.csv"

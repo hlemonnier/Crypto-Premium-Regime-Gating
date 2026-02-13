@@ -13,6 +13,7 @@ from src.thresholds import quantile_threshold
 @dataclass(frozen=True)
 class StrategyConfig:
     entry_k: float = 2.0
+    strict_notice_gating: bool = True
     t_widen_quantile: float = 0.80
     chi_widen_quantile: float = 0.80
     threshold_mode: str = "expanding"
@@ -48,6 +49,7 @@ class ExecutionUnifierConfig:
     horizon_estimation_min_obs: int = 30
     size_grid_step: float = 0.05
     trade_min_size: float = 0.10
+    trade_edge_buffer_bps: float = 0.0
     widen_floor_size: float = 0.25
     spread_roundtrip_bps: float | None = None
     fees_roundtrip_bps: float | None = None
@@ -744,15 +746,19 @@ def build_decisions(
         slippage_curve=slippage_curve,
     )
 
-    base_trade_gate = (~riskoff) & (~widen) & trade_signal
+    base_trade_gate = (~riskoff) & (~widen)
     if bool(unifier_cfg.enabled) and premium is not None:
         expected_opt = pd.to_numeric(unifier_frame["expected_net_pnl_opt_bps"], errors="coerce").fillna(0.0)
         optimal_size = pd.to_numeric(unifier_frame["optimal_size"], errors="coerce").clip(lower=0.0, upper=1.0)
         trade_min = float(np.clip(unifier_cfg.trade_min_size, 0.0, 1.0))
-        net_edge_trade = expected_opt.gt(0.0) & optimal_size.ge(trade_min) & m_t.notna()
+        edge_buffer_bps = float(max(0.0, unifier_cfg.trade_edge_buffer_bps))
+        net_edge_trade = expected_opt.gt(edge_buffer_bps) & optimal_size.ge(trade_min) & m_t.notna()
         trade = base_trade_gate & net_edge_trade
     else:
-        trade = base_trade_gate
+        trade = base_trade_gate & trade_signal
+
+    if bool(cfg.strict_notice_gating):
+        trade = trade & trade_signal
 
     decision.loc[trade] = "Trade"
 

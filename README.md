@@ -120,6 +120,16 @@ python -m src.execution_data --skip-existing --include-agg-trades
 python -m src.execution_quality --output-dir reports/final
 ```
 
+Robustness defaults:
+
+- walk-forward minimum train episodes: `2` (`--min-train-episodes`)
+- smoke episodes are excluded by default; pass `--include-smoke` to include them
+- compatibility skips are reported in structured CSV files with `reason_code` + `reason` fields.
+
+Strategy gating default:
+
+- `strategy.strict_notice_gating: true` enforces Notice-style hard precondition before `Trade`: `|m_t| > entry_k * T_t * sigma_hat`.
+
 Packaging helpers:
 
 ```bash

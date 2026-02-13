@@ -4,6 +4,7 @@ import argparse
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import glob
 from itertools import product
 from pathlib import Path
 import random
@@ -22,6 +23,25 @@ class CandidateGrid:
     chi_widen_quantile: list[float]
     stress_quantile: list[float]
     recovery_quantile: list[float]
+
+
+def classify_compatibility_reason(exc: Exception) -> dict[str, str]:
+    reason = str(exc).replace("\n", " ").strip()
+    lowered = reason.lower()
+    if "no compatible usdc/usdt target pair" in lowered:
+        code = "missing_target_pair"
+    elif "stablecoin proxy" in lowered or "proxy" in lowered:
+        code = "proxy_unavailable"
+    elif "resample_rule" in lowered or "matrix spacing" in lowered:
+        code = "frequency_mismatch"
+    elif "unsupported" in lowered:
+        code = "unsupported_input"
+    else:
+        code = "pipeline_error"
+    return {
+        "reason_code": str(code),
+        "reason": reason,
+    }
 
 
 def parse_float_list(raw: str) -> list[float]:
@@ -172,7 +192,12 @@ def evaluate_combo(
 def resolve_episode_files(patterns: list[str]) -> list[Path]:
     files: list[Path] = []
     for pattern in patterns:
-        matches = sorted(Path().glob(pattern))
+        raw = str(pattern)
+        if Path(raw).is_absolute():
+            matches = [Path(p) for p in glob.glob(raw)]
+        else:
+            matches = list(Path().glob(raw))
+        matches = sorted(matches)
         files.extend(matches)
     deduped = sorted(set(files))
     if not deduped:
@@ -210,17 +235,80 @@ def split_train_oos_by_time(
 def filter_compatible_matrices(
     base_config: dict,
     matrices: dict[str, pd.DataFrame],
-) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+) -> tuple[dict[str, pd.DataFrame], dict[str, dict[str, str]]]:
     compatible: dict[str, pd.DataFrame] = {}
-    skipped: dict[str, str] = {}
+    skipped: dict[str, dict[str, str]] = {}
     for path, matrix in matrices.items():
         try:
             run_pipeline(base_config, matrix)
         except Exception as exc:
-            skipped[path] = str(exc).replace("\n", " ")
+            skipped[path] = classify_compatibility_reason(exc)
             continue
         compatible[path] = matrix
     return compatible, skipped
+
+
+def compatibility_skip_table(skipped: dict[str, dict[str, str]]) -> pd.DataFrame:
+    rows: list[dict[str, str]] = []
+    for matrix_path in sorted(skipped):
+        detail = skipped[matrix_path]
+        rows.append(
+            {
+                "matrix_path": str(matrix_path),
+                "reason_code": str(detail.get("reason_code", "pipeline_error")),
+                "reason": str(detail.get("reason", "")),
+            }
+        )
+    return pd.DataFrame(rows, columns=["matrix_path", "reason_code", "reason"])
+
+
+def _resolve_output_path(raw_output: str | None) -> Path:
+    if raw_output:
+        return Path(raw_output)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Path("reports/tables") / f"gating_tuning_{stamp}.csv"
+
+
+def _write_graceful_skip_outputs(
+    *,
+    out_path: Path,
+    skipped: dict[str, dict[str, str]],
+    reason_code: str,
+    reason: str,
+    explicit_split: bool,
+    holdout_count: int,
+    min_train_episodes: int,
+    min_oos_episodes: int,
+    train_matrices: dict[str, pd.DataFrame],
+    oos_matrices: dict[str, pd.DataFrame],
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    train_episode_ids = "|".join(sorted(train_matrices.keys()))
+    oos_episode_ids = "|".join(sorted(oos_matrices.keys()))
+    status_row = pd.DataFrame(
+        [
+            {
+                "run_status": "skipped",
+                "run_skip_reason_code": str(reason_code),
+                "run_skip_reason": str(reason),
+                "run_explicit_split": bool(explicit_split),
+                "run_holdout_count": int(holdout_count),
+                "run_min_train_episodes_required": int(min_train_episodes),
+                "run_min_oos_episodes_required": int(min_oos_episodes),
+                "run_train_episode_count": int(len(train_matrices)),
+                "run_oos_episode_count": int(len(oos_matrices)),
+                "run_train_episode_ids": train_episode_ids,
+                "run_oos_episode_ids": oos_episode_ids,
+            }
+        ]
+    )
+    status_row.to_csv(out_path, index=False)
+    print(f"Tuning skipped gracefully. Status saved to: {out_path}")
+
+    skip_table = compatibility_skip_table(skipped)
+    skipped_path = out_path.with_name(f"{out_path.stem}_compatibility_skipped.csv")
+    skip_table.to_csv(skipped_path, index=False)
+    print(f"Compatibility skip reasons saved to: {skipped_path}")
 
 
 def _print_matrix_block(title: str, matrices: dict[str, pd.DataFrame]) -> None:
@@ -304,6 +392,7 @@ def main() -> None:
     args = parse_args()
     config_path = Path(args.config)
     base_config = load_config(config_path)
+    out_path = _resolve_output_path(args.output)
 
     explicit_split = (args.train_episodes is not None) or (args.test_episodes is not None)
     if explicit_split and (args.train_episodes is None or args.test_episodes is None):
@@ -327,10 +416,23 @@ def main() -> None:
     compatible, skipped = filter_compatible_matrices(base_config, all_matrices)
     if skipped:
         print("Skipped incompatible episodes:")
-        for path, reason in skipped.items():
-            print(f"- {path}: {reason}")
+        for path, detail in skipped.items():
+            print(f"- {path} [{detail.get('reason_code', 'pipeline_error')}]: {detail.get('reason', '')}")
     if not compatible:
-        raise RuntimeError("No compatible episodes available after symbol coverage checks.")
+        reason = "No compatible episodes available after symbol coverage checks."
+        _write_graceful_skip_outputs(
+            out_path=out_path,
+            skipped=skipped,
+            reason_code="no_compatible_episodes",
+            reason=reason,
+            explicit_split=bool(explicit_split),
+            holdout_count=int(args.holdout_count),
+            min_train_episodes=int(args.min_train_episodes),
+            min_oos_episodes=int(args.min_oos_episodes),
+            train_matrices={},
+            oos_matrices={},
+        )
+        return
 
     if explicit_split:
         train_matrices = {k: v for k, v in compatible.items() if k in train_keys}
@@ -342,18 +444,57 @@ def main() -> None:
         )
 
     if not train_matrices:
-        raise RuntimeError("Training split is empty after compatibility filtering.")
+        reason = "Training split is empty after compatibility filtering."
+        _write_graceful_skip_outputs(
+            out_path=out_path,
+            skipped=skipped,
+            reason_code="empty_train_split",
+            reason=reason,
+            explicit_split=bool(explicit_split),
+            holdout_count=int(args.holdout_count),
+            min_train_episodes=int(args.min_train_episodes),
+            min_oos_episodes=int(args.min_oos_episodes),
+            train_matrices=train_matrices,
+            oos_matrices=oos_matrices,
+        )
+        return
     if len(train_matrices) < max(1, int(args.min_train_episodes)):
-        raise RuntimeError(
+        reason = (
             "Training split is too small for robust selection: "
             f"got {len(train_matrices)} episodes, require >= {int(args.min_train_episodes)}."
         )
+        _write_graceful_skip_outputs(
+            out_path=out_path,
+            skipped=skipped,
+            reason_code="insufficient_train_episodes",
+            reason=reason,
+            explicit_split=bool(explicit_split),
+            holdout_count=int(args.holdout_count),
+            min_train_episodes=int(args.min_train_episodes),
+            min_oos_episodes=int(args.min_oos_episodes),
+            train_matrices=train_matrices,
+            oos_matrices=oos_matrices,
+        )
+        return
     if len(oos_matrices) < max(1, int(args.min_oos_episodes)):
-        raise RuntimeError(
+        reason = (
             "OOS split is too small for robust validation: "
             f"got {len(oos_matrices)} episodes, require >= {int(args.min_oos_episodes)}. "
             "Add more episodes or pass explicit --train-episodes/--test-episodes."
         )
+        _write_graceful_skip_outputs(
+            out_path=out_path,
+            skipped=skipped,
+            reason_code="insufficient_oos_episodes",
+            reason=reason,
+            explicit_split=bool(explicit_split),
+            holdout_count=int(args.holdout_count),
+            min_train_episodes=int(args.min_train_episodes),
+            min_oos_episodes=int(args.min_oos_episodes),
+            train_matrices=train_matrices,
+            oos_matrices=oos_matrices,
+        )
+        return
 
     _print_matrix_block("Train episodes:", train_matrices)
     _print_matrix_block("OOS episodes:", oos_matrices)
@@ -405,15 +546,15 @@ def main() -> None:
     print("Top combinations:")
     print(table.head(args.top).to_string(index=False))
 
-    out_path = (
-        Path(args.output)
-        if args.output
-        else Path("reports/tables")
-        / f"gating_tuning_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
-    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     table.to_csv(out_path, index=False)
     print(f"Tuning results saved to: {out_path}")
+
+    skip_table = compatibility_skip_table(skipped)
+    skipped_path = out_path.with_name(f"{out_path.stem}_compatibility_skipped.csv")
+    skip_table.to_csv(skipped_path, index=False)
+    if not skip_table.empty:
+        print(f"Compatibility skip reasons saved to: {skipped_path}")
 
     if args.apply:
         best = table.iloc[0].to_dict()
