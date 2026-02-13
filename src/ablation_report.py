@@ -2,114 +2,19 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
-import warnings
 
 import pandas as pd
 
+from src.ablation_core import build_dataclass, compute_core_frames, simple_decision
 from src.backtest import BacktestConfig, run_backtest, run_naive_baseline
 from src.hawkes import HawkesConfig, estimate_hawkes_rolling, evaluate_hawkes_quality
-from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
 from src.pipeline import load_config, load_price_matrix
-from src.premium import PremiumConfig, build_premium_frame
-from src.regimes import RegimeConfig, build_regime_frame
-from src.robust_filter import RobustFilterConfig, build_robust_frame
-from src.statmech import StatMechConfig, build_statmech_frame
 from src.strategy import StrategyConfig, build_decisions
 
 VARIANT_ORDER = ["naive", "debias_only", "plus_robust", "plus_regime", "plus_hawkes"]
-
-
-def _build_dataclass(cls: Any, data: dict[str, Any] | None) -> Any:
-    data = data or {}
-    valid_fields = {field.name for field in fields(cls)}
-    kwargs = {k: v for k, v in data.items() if k in valid_fields}
-    return cls(**kwargs)
-
-
-def _simple_decision(
-    signal: pd.Series,
-    threshold: pd.Series | float,
-    depeg_flag: pd.Series,
-) -> pd.Series:
-    decision = pd.Series("Widen", index=signal.index, dtype="object")
-    trade = signal.abs().gt(threshold)
-    decision.loc[trade] = "Trade"
-    decision.loc[depeg_flag.astype(bool)] = "Risk-off"
-    return decision.rename("decision")
-
-
-def _compute_core_frames(config: dict[str, Any], matrix: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    freq = config.get("data", {}).get("resample_rule", "1min")
-
-    premium_cfg = _build_dataclass(PremiumConfig, config.get("premium"))
-    premium_raw = config.get("premium", {})
-    proxy_pairs_raw = premium_raw.get("proxy_pairs", [])
-    proxy_pairs = [tuple(pair) for pair in proxy_pairs_raw] if proxy_pairs_raw else None
-    premium_frame, proxy_components = build_premium_frame(
-        matrix,
-        premium_cfg,
-        proxy_pairs=proxy_pairs,
-        freq=freq,
-    )
-
-    onchain_cfg = _build_dataclass(OnchainConfig, config.get("onchain"))
-    onchain_fail_closed_on_error = bool(getattr(onchain_cfg, "fail_closed_on_error", True))
-    if onchain_cfg.enabled:
-        try:
-            onchain_frame = build_onchain_validation_frame(
-                index=premium_frame.index,
-                stablecoin_proxy=premium_frame["stablecoin_proxy"],
-                cfg=onchain_cfg,
-            )
-        except Exception as exc:
-            if onchain_fail_closed_on_error:
-                warnings.warn(
-                    "On-chain validation failed in ablation run; fail-closed guardrail engaged "
-                    f"(forcing Risk-off until recovery): {exc}"
-                )
-            else:
-                warnings.warn(
-                    "On-chain validation failed in ablation run; continuing fail-open without "
-                    f"on-chain guardrail: {exc}"
-                )
-            onchain_frame = empty_onchain_frame(
-                premium_frame.index,
-                fail_closed=onchain_fail_closed_on_error,
-            )
-    else:
-        onchain_frame = empty_onchain_frame(premium_frame.index)
-    market_depeg_flag = premium_frame["depeg_flag"].fillna(False).astype(bool).rename("market_depeg_flag")
-    premium_frame["market_depeg_flag"] = market_depeg_flag
-    onchain_effective = onchain_frame.get(
-        "onchain_depeg_flag_effective",
-        pd.Series(False, index=premium_frame.index, name="onchain_depeg_flag_effective"),
-    )
-    onchain_effective = onchain_effective.fillna(False).astype(bool)
-    premium_frame["depeg_flag"] = (market_depeg_flag | onchain_effective).rename("depeg_flag")
-
-    robust_cfg = _build_dataclass(RobustFilterConfig, config.get("robust_filter"))
-    robust_frame = build_robust_frame(premium_frame["p"], cfg=robust_cfg, freq=freq)
-    m_t = robust_frame["p_smooth"].rename("m_t")
-
-    stat_cfg = _build_dataclass(StatMechConfig, config.get("statmech"))
-    state_frame = build_statmech_frame(robust_frame["z_t"], m_t, cfg=stat_cfg, freq=freq)
-
-    regime_cfg = _build_dataclass(RegimeConfig, config.get("regimes"))
-    regime_frame = build_regime_frame(state_frame, regime_cfg)
-
-    return {
-        "premium_frame": premium_frame,
-        "proxy_components": proxy_components,
-        "onchain_frame": onchain_frame,
-        "robust_frame": robust_frame,
-        "state_frame": state_frame,
-        "regime_frame": regime_frame,
-        "m_t": m_t,
-        "freq": pd.Series([freq]),
-    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,7 +52,7 @@ def _run_ablation_once(
     *,
     skip_hawkes: bool,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-    frames = _compute_core_frames(config, matrix)
+    frames = compute_core_frames(config, matrix, premium_leg="debiased")
     premium_frame = frames["premium_frame"]
     onchain_frame = frames["onchain_frame"]
     robust_frame = frames["robust_frame"]
@@ -156,8 +61,8 @@ def _run_ablation_once(
     m_t = frames["m_t"]
     freq = str(frames["freq"].iloc[0])
 
-    strategy_cfg = _build_dataclass(StrategyConfig, config.get("strategy"))
-    backtest_cfg = _build_dataclass(BacktestConfig, config.get("backtest"))
+    strategy_cfg = build_dataclass(StrategyConfig, config.get("strategy"))
+    backtest_cfg = build_dataclass(BacktestConfig, config.get("backtest"))
 
     metrics_rows: list[dict[str, float]] = []
     logs: dict[str, pd.DataFrame] = {}
@@ -181,7 +86,7 @@ def _run_ablation_once(
     metrics_rows.append({"variant": "naive", **naive_metrics})
     logs["naive"] = naive_log
 
-    debias_decision = _simple_decision(
+    debias_decision = simple_decision(
         premium_frame["p"],
         threshold=backtest_cfg.naive_threshold,
         depeg_flag=premium_frame["depeg_flag"],
@@ -202,7 +107,7 @@ def _run_ablation_once(
     logs["debias_only"] = debias_log
 
     robust_threshold = (strategy_cfg.entry_k * robust_frame["sigma_hat"]).rename("robust_threshold")
-    robust_decision = _simple_decision(
+    robust_decision = simple_decision(
         robust_frame["p_smooth"],
         threshold=robust_threshold,
         depeg_flag=premium_frame["depeg_flag"],
@@ -254,7 +159,7 @@ def _run_ablation_once(
     logs["plus_regime"] = regime_log
 
     if not skip_hawkes:
-        hawkes_cfg = _build_dataclass(HawkesConfig, config.get("hawkes"))
+        hawkes_cfg = build_dataclass(HawkesConfig, config.get("hawkes"))
         hawkes_cfg = replace(hawkes_cfg, enabled=True)
         hawkes_frame = estimate_hawkes_rolling(robust_frame["event"], hawkes_cfg)
         hawkes_quality_pass, _, _ = evaluate_hawkes_quality(hawkes_frame, hawkes_cfg)

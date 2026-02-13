@@ -416,6 +416,40 @@ Variants included:
 - `plus_regime`
 - `plus_hawkes`
 
+## Robustness report (walk-forward + factorial ablations + stress matrix)
+
+Run the full quant-clean robustness protocol:
+
+```bash
+python -m src.robustness_report \
+  --config configs/config.yaml \
+  --episodes "data/processed/episodes/*/prices_matrix.*" \
+  --output-dir reports/robustness
+```
+
+This runner performs:
+
+- chronological walk-forward OOS splits (`train=[0..i-1]`, `test=i`)
+- per-split recalibration on train windows
+- full factorial ablations:
+  - `premium(naive|debiased) x gating(on|off) x statmech(on|off) x hawkes(on|off)`
+- stress scenarios on every variant:
+  - `base`, `fees_x2`, `spread_x2`, `latency_1bar`, `liquidity_half`, `combined_worst`
+
+Artifacts:
+
+- `reports/robustness/walkforward_split_metrics.csv`
+- `reports/robustness/ablation_factorial_oos.csv`
+- `reports/robustness/stress_matrix_oos.csv`
+- `reports/robustness/robustness_verdict.csv`
+- `reports/robustness/robustness_summary.md`
+
+Strict verdict rule (`robustness_verdict.csv`):
+
+- `PASS` iff base scenario has `Sharpe > 0` and `PnL net > 0`
+- and at least `3/4` single stress scenarios pass (`fees_x2`, `spread_x2`, `latency_1bar`, `liquidity_half`)
+- `combined_worst` is reported separately as severity check
+
 ## Final calibration and presentation polish
 
 Run calibration comparison (baseline Notice defaults vs tuned config):
