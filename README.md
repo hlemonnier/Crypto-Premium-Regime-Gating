@@ -5,6 +5,28 @@ This repository implements the v5 framework described in `AGENTS.md` and the two
 - `Notice.pdf` (baseline: premium + stat-mech + regime gating)
 - `Notice + Hawkes.pdf` (optional Hawkes contagion overlay)
 
+## Recruiter quickstart (5 minutes)
+
+From a fresh clone, these are the only commands needed to verify the project runs:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -p 'test_*.py' -q
+python -m src.pipeline --config configs/config.yaml
+```
+
+What this produces:
+
+- core tables: `reports/tables/`
+- core figures: `reports/figures/`
+- final polished package: `reports/final/`
+
+The default config (`configs/config.yaml`) already points to a bundled sample matrix:
+
+- `data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv`
+
 ## Scope selected from the hiring brief
 
 This project combines:
@@ -48,31 +70,70 @@ download_okx_range(
 )
 ```
 
-## Repository structure
+## Repository map (complete)
 
-```
-src/
-  data_ingest.py      # load/clean/resample market data
-  binance_data.py     # Binance episode loader (spot/futures)
-  bybit_data.py       # Bybit kline loader (spot/linear)
-  okx_data.py         # OKX trade-archive loader (futures contracts)
-  onchain.py          # on-chain validation (DefiLlama stablecoin prices)
-  premium.py          # p_naive, stablecoin proxy, debiased p, depeg flag
-  robust_filter.py    # p_smooth, sigma_hat, z_t, events
-  statmech.py         # H_t, T_t, chi_t
-  regimes.py          # stress/transient baseline change-point regime model
-  hawkes.py           # optional rolling Hawkes fit + n(t)
-  strategy.py         # Trade/Widen/Risk-off decision logic
-  backtest.py         # naive vs gated backtest + metrics
-  ablation_report.py  # single-command ablation ladder report
-  execution_data.py   # public execution dataset bootstrap (orderbook/trades)
-  execution_quality.py # slippage/resilience proxy diagnostics from bar+volume data
-  plots.py            # Figure 1/2/3 exports
-  pipeline.py         # end-to-end runner
-  tune_gating.py      # parameter tuning for regime/strategy gating
-  calibration_report.py # tuned vs baseline (Notice defaults) validation
-  presentation_pack.py  # polished final tables/figures/summary pack
-```
+Top-level folders/files:
+
+- `.github/workflows/tests.yml`: CI workflow running unit/regression tests
+- `.gitignore`: ignore rules for local/runtime artifacts
+- `AGENT.md`: project coding guide used during implementation
+- `AGENTS.md`: v5 specification and acceptance criteria
+- `Notice.pdf`: baseline note from the brief
+- `Notice + Hawkes.pdf`: Hawkes extension note from the brief
+- `README.md`: runbook and project documentation
+- `requirements.txt`: pinned Python dependencies
+- `configs/config.yaml`: default runtime configuration
+- `src/`: full implementation modules
+- `tests/`: automated regression tests
+- `scripts/`: packaging and cleanup helpers
+- `notebooks/01_report.ipynb`: notebook report surface
+- `data/`: raw + processed data folders (local runtime inputs/cache)
+- `reports/`: generated outputs (tables/figures/final package + historical reruns)
+
+Common runtime subfolders:
+
+- `data/raw/`: downloaded raw exchange files (CSV/ZIP inputs before normalization)
+- `data/processed/episodes/<episode>/`: episode-ready matrices (`prices_matrix.*`)
+- `data/processed/onchain/`: cached DefiLlama on-chain feed snapshots
+- `data/processed/orderbook/<episode>/`: execution/L2 datasets used by execution diagnostics
+- `reports/tables/`: default pipeline tables for the latest run
+- `reports/figures/`: default pipeline figures for the latest run
+- `reports/final/`: consolidated final deliverables (calibration/execution/summary pack)
+- `reports/episodes/<episode>/`: per-episode outputs when using episode loaders with `--run-pipeline`
+
+All source files under `src/`:
+
+- `src/__init__.py`: package marker and module-level description
+- `src/data_ingest.py`: raw file normalization, UTC alignment, resampling, glitch filters
+- `src/binance_data.py`: Binance episode downloader + matrix builder
+- `src/bybit_data.py`: Bybit episode downloader + matrix builder
+- `src/okx_data.py`: OKX archive downloader + matrix builder
+- `src/onchain.py`: DefiLlama on-chain stablecoin validation and freshness/depeg guards
+- `src/premium.py`: `p_naive`, stablecoin proxy, debiased premium `p`, depeg market flag
+- `src/robust_filter.py`: robust smoothing/scale (`p_smooth`, `sigma_hat`, `z_t`, events)
+- `src/statmech.py`: stat-mech features (`H_t`, `T_t`, `chi_t`)
+- `src/thresholds.py`: causal threshold utilities (`fixed`/`expanding`/`rolling` quantiles)
+- `src/regimes.py`: transient/stress regime construction
+- `src/hawkes.py`: optional rolling Hawkes fit and branching ratio quality gates
+- `src/strategy.py`: final decision policy (`Trade`/`Widen`/`Risk-off`) and sizing
+- `src/backtest.py`: naive vs gated backtest engines + metric exports
+- `src/ablation_core.py`: shared core builders for factorial ablations
+- `src/ablation_report.py`: single-command ablation ladder report
+- `src/robustness_report.py`: walk-forward OOS robustness + stress-matrix report
+- `src/tune_gating.py`: parameter search with explicit OOS selection
+- `src/calibration_report.py`: tuned-vs-baseline calibration comparisons
+- `src/execution_data.py`: bootstrap public execution datasets (L2/trades where available)
+- `src/execution_quality.py`: slippage/resilience diagnostics and execution report
+- `src/plots.py`: figure builders (timeline/panel/phase-space/edge-net)
+- `src/pipeline.py`: end-to-end orchestrator for the full run
+- `src/presentation_pack.py`: consolidated final report pack for submission
+
+Tests and scripts:
+
+- `tests/test_regressions.py`: end-to-end and component-level regressions
+- `tests/test_robustness_report.py`: robustness report validation tests
+- `scripts/package_submission.sh`: builds recruiter-facing clean zip package
+- `scripts/clean_local_artifacts.sh`: removes local temporary/generated clutter
 
 ## Setup
 
@@ -87,6 +148,23 @@ pip install -r requirements.txt
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -q
 ```
+
+## CLI command index
+
+All executable modules (validated with `--help`):
+
+- `python -m src.pipeline --config configs/config.yaml`: run full premium/regime pipeline on an existing price matrix
+- `python -m src.data_ingest --inputs ... --output-dir data/processed`: normalize raw market files into aligned processed tables
+- `python -m src.binance_data --start ... --end ... --run-pipeline`: download Binance episode data and optionally run pipeline
+- `python -m src.bybit_data --start ... --end ... --run-pipeline`: download Bybit episode data and optionally run pipeline
+- `python -m src.okx_data --start ... --end ... --run-pipeline`: download OKX archive data and optionally run pipeline
+- `python -m src.execution_data --skip-existing --include-agg-trades`: bootstrap execution datasets (orderbook/trades)
+- `python -m src.execution_quality --output-dir reports/final`: compute execution slippage/resilience diagnostics
+- `python -m src.ablation_report --output-dir reports/tables`: run ablation ladder (`naive` -> `debias` -> `robust` -> `regime` -> optional `hawkes`)
+- `python -m src.robustness_report --output-dir reports/robustness`: run walk-forward OOS robustness + stress matrix
+- `python -m src.tune_gating --episodes ... --apply`: tune gating thresholds with explicit train/OOS split
+- `python -m src.calibration_report --episodes ... --output-dir reports/final`: compare tuned config against Notice-style baseline
+- `python -m src.presentation_pack --output-dir reports/final --reports-root reports`: build final recruiter-facing pack
 
 ## Expected input
 
@@ -496,7 +574,8 @@ Main final artifacts:
 - `reports/tables/metrics.csv`
 - `reports/tables/trade_log_gated.csv`
 - `reports/tables/trade_log_naive.csv`
-- `reports/tables/signal_frame.parquet`
+- `reports/tables/signal_frame.parquet` (fallback: `reports/tables/signal_frame.csv`)
+- `reports/tables/stablecoin_proxy_components.parquet` (fallback: `reports/tables/stablecoin_proxy_components.csv`)
 - `reports/tables/safety_diagnostics.csv`
 - `reports/tables/edge_net_size_curve.csv`
 - `reports/tables/break_even_premium_curve.csv`
