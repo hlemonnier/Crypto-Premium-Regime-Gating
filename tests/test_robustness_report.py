@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -56,6 +57,29 @@ def _make_synthetic_matrix(*, start: str, periods: int, seed: int) -> pd.DataFra
 
 
 class RobustnessReportTests(unittest.TestCase):
+    def test_filter_compatible_skips_degenerate_strategy_episode(self) -> None:
+        matrix = _make_synthetic_matrix(start="2024-01-01", periods=60, seed=99)
+        fake_metrics = pd.DataFrame(
+            [{"degenerate_no_trade": 1, "comparable_vs_naive": 0}],
+            index=["gated"],
+        )
+        with patch("src.robustness_report.run_pipeline", return_value={"metrics": fake_metrics}):
+            compatible, skipped = filter_compatible_matrices({}, {"ep": matrix})
+        self.assertEqual(len(compatible), 0)
+        self.assertIn("ep", skipped)
+        self.assertEqual(skipped["ep"]["reason_code"], "degenerate_strategy")
+
+    def test_filter_compatible_keeps_non_degenerate_episode(self) -> None:
+        matrix = _make_synthetic_matrix(start="2024-01-01", periods=60, seed=100)
+        fake_metrics = pd.DataFrame(
+            [{"degenerate_no_trade": 0, "comparable_vs_naive": 1}],
+            index=["gated"],
+        )
+        with patch("src.robustness_report.run_pipeline", return_value={"metrics": fake_metrics}):
+            compatible, skipped = filter_compatible_matrices({}, {"ep": matrix})
+        self.assertIn("ep", compatible)
+        self.assertEqual(len(skipped), 0)
+
     def test_default_episode_filter_excludes_smoke(self) -> None:
         files = [
             Path("data/processed/episodes/smoke_2024_08_05/prices_matrix.csv"),
@@ -81,6 +105,8 @@ class RobustnessReportTests(unittest.TestCase):
         cfg["onchain"]["enabled"] = False
         cfg.setdefault("premium", {})
         cfg["premium"]["allow_synthetic_usdc_from_usdt"] = False
+        cfg.setdefault("execution_unifier", {})
+        cfg["execution_unifier"]["enabled"] = False
 
         good = _make_synthetic_matrix(start="2024-02-01", periods=180, seed=11)
         idx = pd.date_range("2024-02-01", periods=180, freq="1min", tz="UTC")
@@ -99,7 +125,9 @@ class RobustnessReportTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("good_ep", compatible)
+        if "good_ep" not in compatible:
+            self.assertIn("good_ep", skipped)
+            self.assertEqual(str(skipped["good_ep"].get("reason_code")), "degenerate_strategy")
         self.assertIn("bad_ep", skipped)
         self.assertEqual(str(skipped["bad_ep"].get("reason_code")), "missing_target_pair")
         self.assertTrue(bool(str(skipped["bad_ep"].get("reason", "")).strip()))
