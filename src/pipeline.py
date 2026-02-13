@@ -66,6 +66,28 @@ def _load_optional_slippage_curve(path: str | Path | None) -> pd.DataFrame | Non
         return None
 
 
+def _select_mispricing_signal(
+    *,
+    premium_frame: pd.DataFrame,
+    robust_frame: pd.DataFrame,
+    source: str,
+) -> pd.Series:
+    key = str(source).strip().lower()
+    if key in {"p_smooth", "smooth", "smoothed"}:
+        return pd.to_numeric(robust_frame["p_smooth"], errors="coerce").rename("m_t")
+    if key in {"p", "raw", "p_raw", "debiased"}:
+        return pd.to_numeric(premium_frame["p"], errors="coerce").rename("m_t")
+    if key in {"residual", "p_minus_p_smooth", "deviation"}:
+        residual = pd.to_numeric(premium_frame["p"], errors="coerce") - pd.to_numeric(
+            robust_frame["p_smooth"], errors="coerce"
+        )
+        return residual.rename("m_t")
+    raise ValueError(
+        "Unsupported strategy.m_t_source="
+        f"{source!r}. Expected one of: p_smooth, p, residual."
+    )
+
+
 def _extract_size_curve_columns(frame: pd.DataFrame, prefix: str) -> list[tuple[float, str]]:
     out: list[tuple[float, str]] = []
     marker = f"{prefix}_s"
@@ -442,7 +464,12 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     robust_cfg = _build_dataclass(RobustFilterConfig, config.get("robust_filter"))
     robust_frame = build_robust_frame(premium_frame["p"], cfg=robust_cfg, freq=freq)
 
-    m_t = robust_frame["p_smooth"].rename("m_t")
+    strategy_cfg = _build_dataclass(StrategyConfig, config.get("strategy"))
+    m_t = _select_mispricing_signal(
+        premium_frame=premium_frame,
+        robust_frame=robust_frame,
+        source=str(strategy_cfg.m_t_source),
+    )
     stat_cfg = _build_dataclass(StatMechConfig, config.get("statmech"))
     state_frame = build_statmech_frame(
         robust_frame["z_t"],
@@ -481,7 +508,6 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
             continue
         hawkes_diag_frame[key] = float(value)
 
-    strategy_cfg = _build_dataclass(StrategyConfig, config.get("strategy"))
     decision_frame = build_decisions(
         m_t=m_t,
         T_t=state_frame["T_t"],

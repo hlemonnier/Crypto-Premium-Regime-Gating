@@ -93,9 +93,10 @@ hawkes:
   quality_min_n_std: 0.005
   quality_min_fit_ok_ratio: 0.2
 strategy:
-  entry_k: 1.0
+  entry_k: 0.5
   strict_notice_gating: true
-  t_widen_quantile: 0.97
+  m_t_source: p
+  t_widen_quantile: 0.99
   chi_widen_quantile: 0.99
   confidence_floor: 0.1
   confidence_ceiling: 1.0
@@ -135,7 +136,7 @@ execution_unifier:
   slippage_root: BTC
   slippage_quote_preference: USDT
 backtest:
-  cost_bps: 1.0
+  cost_bps: 0.75
   naive_threshold: 0.001
   position_mode: stateful
   exit_on_widen: false

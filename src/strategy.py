@@ -14,6 +14,11 @@ from src.thresholds import quantile_threshold
 class StrategyConfig:
     entry_k: float = 2.0
     strict_notice_gating: bool = True
+    # Source used to define mispricing m_t inside pipeline:
+    # - "p_smooth": smoothed debiased premium (legacy default)
+    # - "p": raw debiased premium
+    # - "residual": p - p_smooth
+    m_t_source: str = "p_smooth"
     t_widen_quantile: float = 0.80
     chi_widen_quantile: float = 0.80
     threshold_mode: str = "expanding"

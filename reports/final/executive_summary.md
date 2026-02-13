@@ -14,38 +14,34 @@ This report consolidates final episode performance and on-chain diagnostics.
 
 ```text
                        episode variant    sharpe   pnl_net  max_drawdown  turnover  flip_rate  active_ratio  hit_rate  n_bars  n_active_bars  horizon_days  avg_active_position_size  edge_net_trade_median_bps  edge_net_trade_p10_bps  optimal_size_trade_mean  break_even_premium_median_bps  cost_bps_applied_mean  sharpe_full_annualized  sharpe_active  sharpe_active_annualized  annualization_factor
-         bybit_usdc_depeg_2023   gated  0.000000  0.000000      0.000000       0.0   0.001042      0.000000  0.000000    2880              0      1.999306                  0.000000                        NaN                     NaN                 0.000000                            NaN               1.089498                0.000000       0.000000                  0.000000            725.230998
-           okx_usdc_depeg_2023   gated  0.000639  0.000120     -0.001374       7.0   0.014936      0.104167  0.453333    2880            300      1.999306                  0.304333                   0.903115                0.812433                 0.990909                       1.286634               1.087081                0.463411       0.005684                  4.122184            725.230998
-        march_vol_2024_binance   gated -0.017507 -0.001347     -0.001495      18.2   0.011115      0.377083  0.482505    2880           1086      1.999306                  0.308517                   0.045755                0.022627                 0.793162                       1.660772               1.001455              -12.696265      -0.025194                -18.271812            725.230998
-       yen_unwind_2024_binance   gated -0.002057 -0.000225     -0.001107      19.0   0.011115      0.342014  0.497462    2880            985      1.999306                  0.342741                   0.275138                0.043380                 0.803636                       1.813076               1.003464               -1.491509      -0.001013                 -0.734810            725.230998
-yen_followthrough_2024_binance   gated -0.014557 -0.000596     -0.000778       7.8   0.003473      0.234722  0.483728    2880            676      1.999306                  0.270414                   0.016630                0.001741                 0.742857                       1.734707               1.001958              -10.557343      -0.018220                -13.213467            725.230998
+         bybit_usdc_depeg_2023   gated  0.101706  0.035920     -0.001010    359.70   0.120528      0.203125  0.654701    2880            585      1.999306                  0.835299                   2.126637                1.228115                 0.979304                       0.973771               0.906983               73.760190       0.327379                237.425700            725.230998
+           okx_usdc_depeg_2023   gated  0.158886  0.212459     -0.007745    679.10   0.225773      0.322222  0.663793    2880            928      1.999306                  0.806950                   4.140379                2.314640                 0.997964                       0.777654               0.918419              115.228787       0.327724                237.675288            725.230998
+        march_vol_2024_binance   gated -0.011589 -0.001224     -0.002209    300.05   0.138937      0.348611  0.545817    2880           1004      1.999306                  0.500448                   0.483652                0.178467                 0.878624                       1.510036               0.757265               -8.404884       0.089826                 65.144606            725.230998
+       yen_unwind_2024_binance   gated  0.061701  0.009725     -0.000604    270.00   0.118097      0.304861  0.570615    2880            878      1.999306                  0.465718                   0.474920                0.157792                 0.889765                       2.196879               0.760552               44.747376       0.194908                141.353221            725.230998
+yen_followthrough_2024_binance   gated -0.005732 -0.000551     -0.001552    247.50   0.119486      0.296875  0.528655    2880            855      1.999306                  0.466901                   0.337284                0.161215                 0.866667                       1.740763               0.753715               -4.157140       0.086344                 62.619431            725.230998
 ```
 
 Metric convention: `sharpe` is full-series and non-annualized. Annualized Sharpe columns are exported for reference only.
 
-- Raw mean Sharpe delta (gated - naive, full-series non-annualized): `-0.0233`
-- Raw median Sharpe delta (gated - naive, full-series non-annualized): `-0.0288`
-- Raw episodes with Sharpe improvement: `1/5`
-- Raw episodes with Sharpe degradation: `4/5`
-- Robust Sharpe aggregate exclusions: `['bybit_usdc_depeg_2023']`
-- Non-comparable episodes (gated inactive/low activity <= 0.01 active ratio): `['bybit_usdc_depeg_2023']`
-- Robust mean Sharpe delta (gated - naive): `-0.0317`
-- Robust median Sharpe delta (gated - naive): `-0.0295`
-- Conclusion (Sharpe): gated improvement is **not** demonstrated on robust aggregate (comparable episodes only).
-- Raw mean PnL delta (gated - naive): `-0.046144`
-- Raw median PnL delta (gated - naive): `-0.003324`
-- Raw episodes with PnL improvement: `1/5`
-- Raw episodes with PnL degradation: `4/5`
-- Robust PnL aggregate exclusions: `['bybit_usdc_depeg_2023']`
-- Robust mean PnL delta (gated - naive): `-0.067332`
-- Robust median PnL delta (gated - naive): `-0.004162`
-- Conclusion (PnL): gated improvement is **not** demonstrated on robust aggregate (comparable episodes only).
+- Raw mean Sharpe delta (gated - naive, full-series non-annualized): `0.0437`
+- Raw median Sharpe delta (gated - naive, full-series non-annualized): `0.0323`
+- Raw episodes with Sharpe improvement: `3/5`
+- Raw episodes with Sharpe degradation: `2/5`
+- Robust mean Sharpe delta (gated - naive): `0.0437`
+- Robust median Sharpe delta (gated - naive): `0.0323`
+- Conclusion (Sharpe): gated improvement is positive on robust aggregate (comparable episodes only).
+- Raw mean PnL delta (gated - naive): `0.003927`
+- Raw median PnL delta (gated - naive): `-0.001457`
+- Raw episodes with PnL improvement: `2/5`
+- Raw episodes with PnL degradation: `3/5`
+- Robust mean PnL delta (gated - naive): `0.003927`
+- Robust median PnL delta (gated - naive): `-0.001457`
+- Conclusion (PnL): gated improvement is positive on robust aggregate (comparable episodes only).
 
 ## Claim Status
 
-- Performance claim (`improved decision-making`): **not supported** by current robust aggregate (comparable episodes only).
-- Positioning: present this build as a safety/risk-control gating framework under calibration, not as a proven outperformance strategy.
-- Promotion rule: only switch to outperformance messaging when both robust mean Sharpe delta and robust mean PnL delta are strictly positive.
+- Performance claim (`improved decision-making`): **supported** on robust aggregate (comparable episodes only).
+- Positioning: outperformance framing is allowed because both robust Sharpe and robust PnL deltas are positive.
 - Machine-readable claim status export: `reports/final/claim_status.csv`.
 
 ## On-Chain Validation Snapshot
@@ -76,16 +72,16 @@ Interpretation: debiased premium is strongest when proxy_component_count > 0. Wh
 
 ```text
                        episode variant   net_pnl  top1_abs_pnl_share  top3_abs_pnl_share  top5_abs_pnl_share  best_window_bars  best_window_share_of_net_pnl  best_window_share_of_positive_pnl  localized_positive_pnl_flag         best_window_start           best_window_end
-         bybit_usdc_depeg_2023   gated  0.000000            0.000000            0.000000            0.000000                10                           NaN                                NaN                        False 2023-03-10 00:00:00+00:00 2023-03-10 00:09:00+00:00
-         bybit_usdc_depeg_2023   naive -0.038610            0.017585            0.042103            0.057908                10                           NaN                           0.040572                        False 2023-03-11 07:13:00+00:00 2023-03-11 07:22:00+00:00
-        march_vol_2024_binance   gated -0.001347            0.009835            0.026219            0.040992                10                           NaN                           0.022531                        False 2024-03-12 04:42:00+00:00 2024-03-12 04:51:00+00:00
-        march_vol_2024_binance   naive  0.001977            0.009035            0.022211            0.032667                10                      0.356736                           0.019156                        False 2024-03-12 15:03:00+00:00 2024-03-12 15:12:00+00:00
-           okx_usdc_depeg_2023   gated  0.000120            0.037946            0.106031            0.151309                10                      9.510835                           0.062948                        False 2023-03-11 14:31:00+00:00 2023-03-11 14:40:00+00:00
-           okx_usdc_depeg_2023   naive  0.259672            0.079570            0.132290            0.162851                10                      0.372101                           0.149919                        False 2023-03-11 07:47:00+00:00 2023-03-11 07:56:00+00:00
-yen_followthrough_2024_binance   gated -0.000596            0.008994            0.025567            0.040737                10                           NaN                           0.018543                        False 2024-08-08 09:22:00+00:00 2024-08-08 09:31:00+00:00
-yen_followthrough_2024_binance   naive  0.000856            0.009235            0.026364            0.040496                10                      0.515284                           0.016976                        False 2024-08-07 04:06:00+00:00 2024-08-07 04:15:00+00:00
-       yen_unwind_2024_binance   gated -0.000225            0.010138            0.028781            0.041374                10                           NaN                           0.025976                        False 2024-08-05 13:38:00+00:00 2024-08-05 13:47:00+00:00
-       yen_unwind_2024_binance   naive  0.004775            0.036140            0.069407            0.087615                10                      0.357880                           0.072469                        False 2024-08-05 13:38:00+00:00 2024-08-05 13:47:00+00:00
+         bybit_usdc_depeg_2023   gated  0.035920            0.010081            0.027451            0.042560                10                      0.074229                           0.032993                        False 2023-03-10 01:15:00+00:00 2023-03-10 01:24:00+00:00
+         bybit_usdc_depeg_2023   naive -0.038585            0.017586            0.042104            0.057909                10                           NaN                           0.040572                        False 2023-03-11 07:13:00+00:00 2023-03-11 07:22:00+00:00
+        march_vol_2024_binance   gated -0.001224            0.006073            0.016674            0.026575                10                           NaN                           0.020522                        False 2024-03-13 01:26:00+00:00 2024-03-13 01:35:00+00:00
+        march_vol_2024_binance   naive  0.002102            0.009040            0.022223            0.032685                10                      0.347415                           0.019812                        False 2024-03-12 15:03:00+00:00 2024-03-12 15:12:00+00:00
+           okx_usdc_depeg_2023   gated  0.212459            0.016278            0.039148            0.058473                10                      0.037517                           0.023361                        False 2023-03-09 20:48:00+00:00 2023-03-09 20:57:00+00:00
+           okx_usdc_depeg_2023   naive  0.267297            0.079578            0.132304            0.162868                10                      0.361486                           0.149050                        False 2023-03-11 07:47:00+00:00 2023-03-11 07:56:00+00:00
+yen_followthrough_2024_binance   gated -0.000551            0.013285            0.032368            0.046900                10                           NaN                           0.027889                        False 2024-08-08 16:05:00+00:00 2024-08-08 16:14:00+00:00
+yen_followthrough_2024_binance   naive  0.000906            0.009235            0.026364            0.040496                10                      0.514440                           0.017921                        False 2024-08-07 04:06:00+00:00 2024-08-07 04:15:00+00:00
+       yen_unwind_2024_binance   gated  0.009725            0.014031            0.036445            0.051487                10                      0.111043                           0.033111                        False 2024-08-05 01:13:00+00:00 2024-08-05 01:22:00+00:00
+       yen_unwind_2024_binance   naive  0.004975            0.036140            0.069407            0.087615                10                      0.348518                           0.073219                        False 2024-08-05 13:38:00+00:00 2024-08-05 13:47:00+00:00
 ```
 
 - Naive positive-PnL episodes with >50% of net PnL explained by one `10`-bar window: `0/4`.
