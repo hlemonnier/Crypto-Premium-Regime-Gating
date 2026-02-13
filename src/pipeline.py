@@ -44,6 +44,129 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return data
 
 
+def _parse_positive_timedelta(value: str, *, field_name: str) -> pd.Timedelta:
+    try:
+        td = pd.to_timedelta(value)
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be a valid timedelta string, got {value!r}.") from exc
+    if td <= pd.Timedelta(0):
+        raise ValueError(f"{field_name} must be positive, got {value!r}.")
+    return td
+
+
+def validate_price_matrix_frequency(
+    index: pd.Index,
+    expected_freq: str,
+    *,
+    context: str = "price_matrix",
+) -> pd.Timedelta:
+    if not isinstance(index, pd.DatetimeIndex):
+        raise ValueError(f"{context} must use a DatetimeIndex for frequency validation.")
+    if index.size < 2:
+        raise ValueError(
+            f"{context} needs at least 2 rows to validate spacing against data.resample_rule={expected_freq!r}."
+        )
+
+    expected_td = _parse_positive_timedelta(str(expected_freq), field_name="data.resample_rule")
+    deltas = index.to_series().diff().dropna()
+    positive = deltas[deltas > pd.Timedelta(0)]
+    if positive.empty:
+        raise ValueError(f"{context} has no positive timestamp deltas; cannot validate matrix spacing.")
+
+    mismatched = positive[positive != expected_td]
+    if mismatched.empty:
+        return expected_td
+
+    observed = positive.value_counts().sort_values(ascending=False)
+    preview = ", ".join(
+        f"{str(delta)} x{int(count)}"
+        for delta, count in observed.iloc[:5].items()
+    )
+    raise ValueError(
+        "Configured data.resample_rule does not match price matrix spacing. "
+        f"expected={str(expected_td)} context={context!r} observed_top_deltas=[{preview}]"
+    )
+
+
+def _observed_index_delta(index: pd.Index) -> pd.Timedelta | None:
+    if not isinstance(index, pd.DatetimeIndex) or index.size < 2:
+        return None
+    deltas = index.to_series().diff().dropna()
+    positive = deltas[deltas > pd.Timedelta(0)]
+    if positive.empty:
+        return None
+    observed = positive.value_counts().sort_values(ascending=False)
+    return observed.index[0]
+
+
+def _is_missing_parquet_engine(exc: Exception) -> bool:
+    if isinstance(exc, ImportError):
+        return True
+    message = str(exc).lower()
+    return (
+        "unable to find a usable engine" in message
+        or "missing optional dependency 'pyarrow'" in message
+        or "missing optional dependency 'fastparquet'" in message
+    )
+
+
+def _next_unique_name(base: str, taken: set[object]) -> str:
+    candidate = base
+    suffix = 1
+    while candidate in taken:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    taken.add(candidate)
+    return candidate
+
+
+def _prepare_frame_for_parquet(frame: pd.DataFrame, *, context: str) -> pd.DataFrame:
+    out = frame.copy()
+    duplicated_cols = out.columns[out.columns.duplicated(keep="first")]
+    if len(duplicated_cols) > 0:
+        duplicates = sorted({str(col) for col in duplicated_cols.tolist()})
+        warnings.warn(
+            f"Dropping duplicate column names before parquet export for {context}: {duplicates}",
+            stacklevel=2,
+        )
+        out = out.loc[:, ~out.columns.duplicated(keep="first")]
+
+    if isinstance(out.index, pd.MultiIndex):
+        names: list[object | None] = list(out.index.names)
+    else:
+        names = [out.index.name]
+
+    taken: set[object] = set(out.columns.tolist())
+    seen_index_names: set[object] = set()
+    renamed = False
+    resolved_names: list[object | None] = []
+    for i, name in enumerate(names):
+        if name is None:
+            resolved_names.append(None)
+            continue
+        if (name in taken) or (name in seen_index_names):
+            base = f"{name}_index"
+            resolved = _next_unique_name(base, taken)
+            warnings.warn(
+                f"Renaming index level {i} from {name!r} to {resolved!r} before parquet export for {context}.",
+                stacklevel=2,
+            )
+            resolved_names.append(resolved)
+            seen_index_names.add(resolved)
+            renamed = True
+            continue
+        resolved_names.append(name)
+        seen_index_names.add(name)
+        taken.add(name)
+
+    if renamed:
+        if isinstance(out.index, pd.MultiIndex):
+            out.index = out.index.rename(resolved_names)
+        else:
+            out.index = out.index.rename(resolved_names[0])
+    return out
+
+
 def load_price_matrix(
     path: str | Path,
     *,
@@ -52,6 +175,7 @@ def load_price_matrix(
     single_bar_spike_reversion_log: float = 0.003,
     single_bar_spike_counterpart_max_log: float = 0.002,
     single_bar_spike_min_cross_pairs: int = 1,
+    expected_freq: str | None = None,
 ) -> pd.DataFrame:
     matrix_path = Path(path)
     if not matrix_path.exists():
@@ -91,6 +215,13 @@ def load_price_matrix(
 
     frame = frame.sort_index()
 
+    if expected_freq is not None:
+        validate_price_matrix_frequency(
+            frame.index,
+            str(expected_freq),
+            context=str(matrix_path),
+        )
+
     if sanitize_pair_spikes:
         frame, diagnostics = sanitize_single_bar_spikes(
             frame,
@@ -109,7 +240,12 @@ def load_price_matrix(
 
 def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str, Any]:
     data_cfg = config.get("data", {})
-    freq = data_cfg.get("resample_rule", "1min")
+    freq = str(data_cfg.get("resample_rule", "1min"))
+    validate_price_matrix_frequency(
+        price_matrix.index,
+        freq,
+        context="run_pipeline.price_matrix",
+    )
 
     premium_cfg = _build_dataclass(PremiumConfig, config.get("premium"))
     premium_raw = config.get("premium", {})
@@ -243,6 +379,7 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
 
 def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str, Path]:
     outputs_cfg = config.get("outputs", {})
+    data_cfg = config.get("data", {})
     tables_dir = Path(outputs_cfg.get("tables_dir", "reports/tables"))
     figures_dir = Path(outputs_cfg.get("figures_dir", "reports/figures"))
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -262,6 +399,11 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     results["naive_log"].to_csv(naive_path, index=True)
     signal_path = _save_frame(signal_frame, signal_path)
     proxy_path = _save_frame(results["proxy_components"], proxy_path)
+    configured_freq = str(data_cfg.get("resample_rule", "1min"))
+    expected_td = _parse_positive_timedelta(configured_freq, field_name="data.resample_rule")
+    observed_td = _observed_index_delta(signal_frame.index)
+    observed_delta = str(observed_td) if observed_td is not None else "n/a"
+    frequency_consistent = bool(observed_td == expected_td) if observed_td is not None else False
     depeg_flag = signal_frame.get("depeg_flag", pd.Series(False, index=signal_frame.index)).astype(bool)
     riskoff_flag = signal_frame.get("riskoff_flag", pd.Series(False, index=signal_frame.index)).astype(bool)
     onchain_stale = signal_frame.get("onchain_data_stale", pd.Series(False, index=signal_frame.index)).astype(bool)
@@ -278,6 +420,10 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
                 if not signal_frame.empty
                 else "n/a",
                 "onchain_stale_ratio": float(onchain_stale.mean()) if len(onchain_stale) > 0 else 0.0,
+                "configured_resample_rule": configured_freq,
+                "expected_index_delta": str(expected_td),
+                "observed_index_delta": observed_delta,
+                "index_delta_matches_config": frequency_consistent,
             }
         ]
     )
@@ -315,12 +461,15 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
 
 
 def _save_frame(frame: pd.DataFrame, preferred_path: Path) -> Path:
+    prepared = _prepare_frame_for_parquet(frame, context=str(preferred_path))
     try:
-        frame.to_parquet(preferred_path)
+        prepared.to_parquet(preferred_path)
         return preferred_path
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_parquet_engine(exc):
+            raise
         fallback = preferred_path.with_suffix(".csv")
-        frame.to_csv(fallback, index=True)
+        prepared.to_csv(fallback, index=True)
         return fallback
 
 
@@ -356,6 +505,7 @@ def main() -> None:
         single_bar_spike_reversion_log=float(data_cfg.get("single_bar_spike_reversion_log", 0.003)),
         single_bar_spike_counterpart_max_log=float(data_cfg.get("single_bar_spike_counterpart_max_log", 0.002)),
         single_bar_spike_min_cross_pairs=int(data_cfg.get("single_bar_spike_min_cross_pairs", 1)),
+        expected_freq=str(data_cfg.get("resample_rule", "1min")),
     )
     results = run_pipeline(config, price_matrix)
     exported = export_outputs(results, config)

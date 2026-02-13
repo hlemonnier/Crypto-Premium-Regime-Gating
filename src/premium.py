@@ -235,6 +235,53 @@ def _rolling_pw_location(
     return pd.Series(out, index=series.index, name="stablecoin_proxy")
 
 
+def _diff_std(series: pd.Series) -> float:
+    diffs = series.astype(float).diff().to_numpy(dtype=float)
+    finite = diffs[np.isfinite(diffs)]
+    if finite.size == 0:
+        return float("nan")
+    return float(np.std(finite, ddof=0))
+
+
+def _ewma_smooth(series: pd.Series, *, span_obs: int) -> pd.Series:
+    span = max(2, int(span_obs))
+    smoothed = series.ewm(span=span, adjust=False, min_periods=1).mean()
+    smoothed = smoothed.where(series.notna())
+    return smoothed.rename(series.name)
+
+
+def _enforce_proxy_smoothness(
+    proxy: pd.Series,
+    *,
+    target_p_naive: pd.Series,
+    freq_td: pd.Timedelta,
+    max_ratio: float = 1.0,
+) -> pd.Series:
+    if not np.isfinite(max_ratio) or max_ratio <= 0.0:
+        raise ValueError("max_ratio must be a positive finite float.")
+
+    target_std = _diff_std(target_p_naive)
+    proxy_std = _diff_std(proxy)
+    if (not np.isfinite(target_std)) or target_std <= 0.0 or (not np.isfinite(proxy_std)):
+        return proxy
+    if proxy_std <= (max_ratio * target_std):
+        return proxy
+
+    base_span = max(2, int(np.ceil(pd.Timedelta("5min") / freq_td)))
+    span_grid = sorted({max(2, base_span * mult) for mult in (1, 2, 4, 8, 16, 32)})
+
+    best = proxy
+    for span in span_grid:
+        candidate = _ewma_smooth(proxy, span_obs=span)
+        candidate_std = _diff_std(candidate)
+        if not np.isfinite(candidate_std):
+            continue
+        best = candidate
+        if candidate_std <= (max_ratio * target_std):
+            return candidate
+    return best
+
+
 def compute_stablecoin_proxy(
     price_matrix: pd.DataFrame,
     *,
@@ -318,6 +365,30 @@ def compute_stablecoin_proxy(
             rho_clip=float(pw_rho_clip),
             fallback_to_current=bool(pw_fallback_to_median),
         )
+
+    can_compare_to_target = (
+        target_pair is not None
+        and target_pair[0] in available_columns
+        and target_pair[1] in available_columns
+    )
+    if can_compare_to_target:
+        target_p_naive = compute_naive_premium(
+            price_matrix,
+            target_pair[0],
+            target_pair[1],
+            min_price=min_price,
+        )
+        try:
+            freq_td = _resolve_freq_timedelta(price_matrix.index, freq=freq)
+        except ValueError:
+            freq_td = None
+        if freq_td is not None:
+            stablecoin_proxy = _enforce_proxy_smoothness(
+                stablecoin_proxy.rename("stablecoin_proxy"),
+                target_p_naive=target_p_naive,
+                freq_td=freq_td,
+                max_ratio=1.0,
+            )
 
     return stablecoin_proxy, proxy_components
 

@@ -10,7 +10,7 @@ This repository implements the v5 framework described in `AGENTS.md` and the two
 This project combines:
 
 - Stable coin analysis:
-  - fair-value proxy of `USDT/USDC` spread via cross-asset replication
+  - empirical proxy of `USDT/USDC` spread via cross-asset replication
   - depeg detection flag (`delta_log`, consecutive minutes converted to bars from `data.resample_rule`)
   - dedicated on-chain validation feed (`onchain_proxy` from DefiLlama)
   - transmission into synthetic premium (`BTCUSDC` vs `BTCUSDT`)
@@ -256,6 +256,12 @@ Current defaults in `configs/config.yaml` include:
 - `premium.pw_window: 12h`
 - `premium.pw_min_period_fraction: 0.5`
 - `onchain.max_source_age_hours: 48`
+
+Proxy smoothness caveat:
+
+- the current implementation applies an empirical smoothness guardrail on `stablecoin_proxy` (diff-vol capped relative to target `p_naive`).
+- this is a practical noise-control heuristic, not a structural guarantee of fair value.
+- during stressed/thin-liquidity windows, it can over-smooth abrupt moves; interpret together with `depeg_flag` and on-chain diagnostics.
 
 Reference OOS tuning table:
 

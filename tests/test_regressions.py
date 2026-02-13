@@ -242,6 +242,55 @@ class NoLookaheadTests(unittest.TestCase):
         pd.testing.assert_frame_equal(full.iloc[:5], prefix)
 
 
+class ProxySmoothnessTests(unittest.TestCase):
+    def test_proxy_diff_std_is_capped_by_target_pair_diff_std(self) -> None:
+        rng = np.random.default_rng(1234)
+        idx = pd.date_range("2024-01-01", periods=360, freq="1min", tz="UTC")
+        n = len(idx)
+
+        stable = np.cumsum(rng.normal(0.0, 1.5e-5, n))
+        btc_base = 30_000.0 * np.exp(np.cumsum(rng.normal(0.0, 6e-4, n)))
+        eth_base = 2_000.0 * np.exp(np.cumsum(rng.normal(0.0, 8e-4, n)))
+        sol_base = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 11e-4, n)))
+        bnb_base = 350.0 * np.exp(np.cumsum(rng.normal(0.0, 9e-4, n)))
+
+        btc_spread = stable + rng.normal(0.0, 7e-5, n)
+        eth_spread = stable + rng.normal(0.0, 3.5e-4, n)
+        sol_spread = stable + rng.normal(0.0, 4.0e-4, n)
+        bnb_spread = stable + rng.normal(0.0, 3.8e-4, n)
+
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDT-PERP": btc_base,
+                "BTCUSDC-PERP": btc_base * np.exp(btc_spread),
+                "ETHUSDT-PERP": eth_base,
+                "ETHUSDC-PERP": eth_base * np.exp(eth_spread),
+                "SOLUSDT-PERP": sol_base,
+                "SOLUSDC-PERP": sol_base * np.exp(sol_spread),
+                "BNBUSDT-PERP": bnb_base,
+                "BNBUSDC-PERP": bnb_base * np.exp(bnb_spread),
+            },
+            index=idx,
+        )
+
+        frame, _ = build_premium_frame(
+            matrix,
+            PremiumConfig(proxy_method="median"),
+            proxy_pairs=[
+                ("ETHUSDC-PERP", "ETHUSDT-PERP"),
+                ("SOLUSDC-PERP", "SOLUSDT-PERP"),
+                ("BNBUSDC-PERP", "BNBUSDT-PERP"),
+            ],
+            freq="1min",
+        )
+
+        proxy_diff_std = float(frame["stablecoin_proxy"].diff().std(ddof=0))
+        target_diff_std = float(frame["p_naive"].diff().std(ddof=0))
+        self.assertTrue(np.isfinite(proxy_diff_std))
+        self.assertTrue(np.isfinite(target_diff_std))
+        self.assertLessEqual(proxy_diff_std, target_diff_std + 1e-12)
+
+
 class HitRateTests(unittest.TestCase):
     def test_hit_rate_counts_only_active_position_bars(self) -> None:
         idx = pd.date_range("2024-01-01", periods=5, freq="1min", tz="UTC")
@@ -448,6 +497,53 @@ class HawkesQualityTests(unittest.TestCase):
             self.assertTrue(signal_path.exists())
             self.assertFalse((tables_dir / "signal_frame.csv").exists())
 
+    def test_hawkes_enabled_bybit_integration_preserves_parquet_exports(self) -> None:
+        matrix_path = Path("data/processed/episodes/bybit_usdc_depeg_2023/prices_matrix.csv")
+        if not matrix_path.exists():
+            self.skipTest(f"Missing bundled bybit matrix: {matrix_path}")
+
+        config = load_config("configs/config.yaml")
+        run_cfg = deepcopy(config)
+        run_cfg.setdefault("hawkes", {})
+        run_cfg["hawkes"]["enabled"] = True
+        run_cfg["onchain"] = {"enabled": False}
+        run_cfg.setdefault("data", {})
+        run_cfg["data"]["resample_rule"] = str(run_cfg["data"].get("resample_rule", "1min"))
+        matrix = load_price_matrix(
+            matrix_path,
+            expected_freq=run_cfg["data"]["resample_rule"],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tables_dir = Path(tmp_dir) / "tables"
+            figures_dir = Path(tmp_dir) / "figures"
+            run_cfg["outputs"] = {"tables_dir": str(tables_dir), "figures_dir": str(figures_dir)}
+
+            results = run_pipeline(run_cfg, matrix)
+
+            def _fake_to_parquet(frame: pd.DataFrame, path: Path | str, *args: object, **kwargs: object) -> None:
+                duplicate_cols = frame.columns[frame.columns.duplicated()].tolist()
+                if duplicate_cols:
+                    raise ValueError(f"Duplicate column names found: {duplicate_cols}")
+                index_names = list(frame.index.names) if isinstance(frame.index, pd.MultiIndex) else [frame.index.name]
+                overlap = [name for name in index_names if name is not None and name in frame.columns]
+                if overlap:
+                    raise ValueError(f"Index/column name collision found: {overlap}")
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_bytes(b"PAR1")
+
+            with patch.object(pd.DataFrame, "to_parquet", autospec=True, side_effect=_fake_to_parquet):
+                exported = export_outputs(results, run_cfg)
+
+            signal_path = Path(exported["signal_frame"])
+            proxy_path = Path(exported["proxy_components"])
+            self.assertEqual(signal_path.suffix, ".parquet")
+            self.assertEqual(proxy_path.suffix, ".parquet")
+            self.assertTrue(signal_path.exists())
+            self.assertTrue(proxy_path.exists())
+            self.assertFalse((tables_dir / "signal_frame.csv").exists())
+            self.assertFalse((tables_dir / "stablecoin_proxy_components.csv").exists())
+
 
 class StrategyFallbackThresholdTests(unittest.TestCase):
     def test_missing_sigma_hat_uses_signal_scale_fallback(self) -> None:
@@ -621,6 +717,83 @@ class PriceMatrixLoaderTests(unittest.TestCase):
                 float(loaded.loc[pd.Timestamp("2024-01-01T00:00:00Z"), "BTCUSDT-PERP"]),
                 102.0,
             )
+
+    def test_loader_rejects_expected_resample_rule_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "matrix.csv"
+            raw = pd.DataFrame(
+                {
+                    "timestamp_utc": [
+                        "2024-01-01T00:00:00Z",
+                        "2024-01-01T00:01:00Z",
+                        "2024-01-01T00:02:00Z",
+                    ],
+                    "BTCUSDT-PERP": [100.0, 101.0, 102.0],
+                }
+            )
+            raw.to_csv(path, index=False)
+
+            with self.assertRaisesRegex(ValueError, "resample_rule"):
+                load_price_matrix(path, expected_freq="5min")
+
+
+class FrequencyValidationTests(unittest.TestCase):
+    def test_run_pipeline_rejects_resample_rule_mismatch(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=20, freq="1min", tz="UTC")
+        base = pd.Series(np.linspace(1.0, 1.01, len(idx)), index=idx)
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": 50_000.0 * base,
+                "BTCUSDT-PERP": 50_000.0 * (base + 1e-6),
+            },
+            index=idx,
+        )
+        config = {
+            "data": {"resample_rule": "5min"},
+            "onchain": {"enabled": False},
+            "premium": {"fail_on_missing_proxy": False},
+        }
+
+        with self.assertRaisesRegex(ValueError, "resample_rule"):
+            run_pipeline(config, matrix)
+
+
+class ExportDiagnosticsTests(unittest.TestCase):
+    def test_safety_diagnostics_includes_frequency_consistency_fields(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=200, freq="1min", tz="UTC", name="timestamp_utc")
+        base = pd.Series(np.linspace(1.0, 1.01, len(idx)), index=idx)
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": 50_000.0 * base,
+                "BTCUSDT-PERP": 50_000.0 * (base + 1e-6),
+                "ETHUSDC-PERP": 2_500.0 * base,
+                "ETHUSDT-PERP": 2_500.0 * (base + 1e-6),
+            },
+            index=idx,
+        )
+        config = load_config("configs/config.yaml")
+        run_cfg = deepcopy(config)
+        run_cfg["onchain"] = {"enabled": False}
+        run_cfg.setdefault("data", {})
+        run_cfg["data"]["resample_rule"] = "1min"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tables_dir = Path(tmp_dir) / "tables"
+            figures_dir = Path(tmp_dir) / "figures"
+            run_cfg["outputs"] = {"tables_dir": str(tables_dir), "figures_dir": str(figures_dir)}
+
+            results = run_pipeline(run_cfg, matrix)
+            export_outputs(results, run_cfg)
+
+            safety_diag = pd.read_csv(tables_dir / "safety_diagnostics.csv")
+            self.assertIn("configured_resample_rule", safety_diag.columns)
+            self.assertIn("expected_index_delta", safety_diag.columns)
+            self.assertIn("observed_index_delta", safety_diag.columns)
+            self.assertIn("index_delta_matches_config", safety_diag.columns)
+            self.assertEqual(str(safety_diag.loc[0, "configured_resample_rule"]), "1min")
+            self.assertEqual(str(safety_diag.loc[0, "expected_index_delta"]), "0 days 00:01:00")
+            self.assertEqual(str(safety_diag.loc[0, "observed_index_delta"]), "0 days 00:01:00")
+            self.assertTrue(bool(safety_diag.loc[0, "index_delta_matches_config"]))
 
 
 class DataIngestTimestampTests(unittest.TestCase):
