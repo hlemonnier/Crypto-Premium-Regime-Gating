@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 import warnings
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -18,12 +19,13 @@ from src.plots import (
     plot_figure_1_timeline,
     plot_figure_2_panel,
     plot_figure_3_phase_space,
+    plot_figure_4_edge_net,
 )
 from src.premium import PremiumConfig, build_premium_frame
 from src.regimes import RegimeConfig, build_regime_frame
 from src.robust_filter import RobustFilterConfig, build_robust_frame
 from src.statmech import StatMechConfig, build_statmech_frame
-from src.strategy import StrategyConfig, build_decisions
+from src.strategy import ExecutionUnifierConfig, StrategyConfig, build_decisions
 
 
 def _build_dataclass(cls: Any, data: dict[str, Any] | None) -> Any:
@@ -42,6 +44,135 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Config must be a mapping at top level.")
     return data
+
+
+def _load_optional_slippage_curve(path: str | Path | None) -> pd.DataFrame | None:
+    if path is None:
+        return None
+    curve_path = Path(path)
+    if not curve_path.exists():
+        warnings.warn(
+            f"Execution unifier slippage curve not found at {curve_path}; using fallback linear cost model.",
+            stacklevel=2,
+        )
+        return None
+    try:
+        return pd.read_csv(curve_path)
+    except Exception as exc:
+        warnings.warn(
+            f"Could not read execution unifier slippage curve at {curve_path}; using fallback linear model: {exc}",
+            stacklevel=2,
+        )
+        return None
+
+
+def _extract_size_curve_columns(frame: pd.DataFrame, prefix: str) -> list[tuple[float, str]]:
+    out: list[tuple[float, str]] = []
+    marker = f"{prefix}_s"
+    for col in frame.columns:
+        if not str(col).startswith(marker):
+            continue
+        token = str(col)[len(marker) :]
+        if len(token) == 0 or (not token.isdigit()):
+            continue
+        size = float(int(token)) / 100.0
+        out.append((size, str(col)))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _nan_quantile_safe(values: pd.Series, q: float) -> float:
+    arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return float("nan")
+    return float(np.quantile(finite, float(q)))
+
+
+def _build_unifier_artifacts(signal_frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if signal_frame.empty:
+        empty = pd.DataFrame()
+        return {"edge_net_size_curve": empty, "break_even_premium_curve": empty, "edge_net_summary": empty}
+
+    expected_cols = _extract_size_curve_columns(signal_frame, "expected_net_pnl_bps")
+    break_even_cols = _extract_size_curve_columns(signal_frame, "break_even_premium_bps")
+    if len(expected_cols) == 0 and len(break_even_cols) == 0:
+        empty = pd.DataFrame()
+        return {"edge_net_size_curve": empty, "break_even_premium_curve": empty, "edge_net_summary": empty}
+
+    regime = signal_frame.get("regime", pd.Series("unknown", index=signal_frame.index)).astype(str)
+    idx_name = signal_frame.index.name or "timestamp_utc"
+
+    curve_rows: list[pd.DataFrame] = []
+    for size, col in expected_cols:
+        values = pd.to_numeric(signal_frame[col], errors="coerce")
+        local = pd.DataFrame(
+            {
+                idx_name: signal_frame.index,
+                "regime": regime,
+                "size": float(size),
+                "expected_net_pnl_bps": values,
+            }
+        )
+        curve_rows.append(local)
+    edge_curve = pd.concat(curve_rows, ignore_index=True) if curve_rows else pd.DataFrame()
+
+    break_rows: list[pd.DataFrame] = []
+    for size, col in break_even_cols:
+        values = pd.to_numeric(signal_frame[col], errors="coerce")
+        local = pd.DataFrame(
+            {
+                idx_name: signal_frame.index,
+                "regime": regime,
+                "size": float(size),
+                "break_even_premium_bps": values,
+            }
+        )
+        break_rows.append(local)
+    break_curve = pd.concat(break_rows, ignore_index=True) if break_rows else pd.DataFrame()
+
+    summary_parts: list[pd.DataFrame] = []
+    if not edge_curve.empty:
+        edge_summary = (
+            edge_curve.groupby(["regime", "size"], as_index=False)
+            .agg(
+                expected_net_pnl_median_bps=("expected_net_pnl_bps", "median"),
+                expected_net_pnl_p10_bps=("expected_net_pnl_bps", lambda s: _nan_quantile_safe(s, 0.10)),
+                n_obs=("expected_net_pnl_bps", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
+            )
+        )
+        summary_parts.append(edge_summary)
+    if (not edge_curve.empty) and (not break_curve.empty):
+        break_summary = (
+            break_curve.groupby(["regime", "size"], as_index=False)
+            .agg(
+                break_even_premium_median_bps=("break_even_premium_bps", "median"),
+                break_even_premium_p90_bps=("break_even_premium_bps", lambda s: _nan_quantile_safe(s, 0.90)),
+            )
+        )
+        merged = summary_parts[0].merge(break_summary, on=["regime", "size"], how="outer")
+        summary_parts = [merged]
+    elif not break_curve.empty:
+        summary_parts.append(
+            break_curve.groupby(["regime", "size"], as_index=False).agg(
+                break_even_premium_median_bps=("break_even_premium_bps", "median"),
+                break_even_premium_p90_bps=("break_even_premium_bps", lambda s: _nan_quantile_safe(s, 0.90)),
+            )
+        )
+
+    edge_summary = summary_parts[0] if summary_parts else pd.DataFrame()
+    if not edge_summary.empty:
+        edge_summary = edge_summary.sort_values(["regime", "size"]).reset_index(drop=True)
+    if not edge_curve.empty:
+        edge_curve = edge_curve.sort_values([idx_name, "regime", "size"]).reset_index(drop=True)
+    if not break_curve.empty:
+        break_curve = break_curve.sort_values([idx_name, "regime", "size"]).reset_index(drop=True)
+
+    return {
+        "edge_net_size_curve": edge_curve,
+        "break_even_premium_curve": break_curve,
+        "edge_net_summary": edge_summary,
+    }
 
 
 def _parse_positive_timedelta(value: str, *, field_name: str) -> pd.Timedelta:
@@ -245,6 +376,15 @@ def load_price_matrix(
 def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str, Any]:
     data_cfg = config.get("data", {})
     freq = str(data_cfg.get("resample_rule", "1min"))
+    backtest_cfg = _build_dataclass(BacktestConfig, config.get("backtest"))
+    execution_unifier_cfg = _build_dataclass(ExecutionUnifierConfig, config.get("execution_unifier"))
+    execution_unifier_raw = config.get("execution_unifier", {})
+    slippage_curve_path = execution_unifier_raw.get(
+        "slippage_curve_path",
+        execution_unifier_cfg.slippage_curve_path,
+    )
+    slippage_curve = _load_optional_slippage_curve(slippage_curve_path) if execution_unifier_cfg.enabled else None
+
     validate_price_matrix_frequency(
         price_matrix.index,
         freq,
@@ -355,6 +495,10 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
         onchain_usdc_minus_1=onchain_frame.get("onchain_usdc_minus_1"),
         onchain_usdt_minus_1=onchain_frame.get("onchain_usdt_minus_1"),
         n_t=n_t,
+        premium=premium_frame["p"],
+        slippage_curve=slippage_curve,
+        execution_unifier_cfg=execution_unifier_cfg,
+        base_cost_bps=backtest_cfg.cost_bps,
         cfg=strategy_cfg,
     )
 
@@ -376,16 +520,42 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     signal_frame = signal_frame.loc[~signal_frame.index.duplicated(keep="last")]
     signal_frame = signal_frame.sort_index()
 
-    backtest_cfg = _build_dataclass(BacktestConfig, config.get("backtest"))
     metrics, gated_log, naive_log = compare_strategies(
         p_naive=signal_frame["p_naive"],
         p_debiased=signal_frame["p"],
         decision_gated=signal_frame["decision"],
         m_t=signal_frame["m_t"],
         size_gated=signal_frame.get("position_size"),
+        dynamic_cost_gated=signal_frame.get("edge_cost_bps_opt"),
+        expected_edge_gated=signal_frame.get("edge_gross_bps"),
+        expected_cost_gated=signal_frame.get("edge_cost_bps_opt"),
+        expected_net_gated=signal_frame.get("edge_net_bps_opt"),
         freq=freq,
         cfg=backtest_cfg,
     )
+
+    if "gated" in metrics.index:
+        trade_mask = signal_frame.get("decision", pd.Series("", index=signal_frame.index)).astype(str).eq("Trade")
+        edge_net_trade = pd.to_numeric(signal_frame.get("edge_net_bps_opt"), errors="coerce").loc[trade_mask]
+        optimal_trade = pd.to_numeric(signal_frame.get("optimal_size"), errors="coerce").loc[trade_mask]
+        break_even_trade = pd.to_numeric(signal_frame.get("break_even_premium_bps_opt"), errors="coerce").loc[trade_mask]
+        metrics.loc["gated", "edge_net_trade_median_bps"] = (
+            float(edge_net_trade.median()) if not edge_net_trade.dropna().empty else float("nan")
+        )
+        metrics.loc["gated", "edge_net_trade_p10_bps"] = (
+            float(edge_net_trade.quantile(0.10)) if not edge_net_trade.dropna().empty else float("nan")
+        )
+        metrics.loc["gated", "optimal_size_trade_mean"] = (
+            float(optimal_trade.mean()) if not optimal_trade.dropna().empty else 0.0
+        )
+        metrics.loc["gated", "break_even_premium_median_bps"] = (
+            float(break_even_trade.median()) if not break_even_trade.dropna().empty else float("nan")
+        )
+        if "cost_bps_applied" in gated_log.columns:
+            cost_series = pd.to_numeric(gated_log["cost_bps_applied"], errors="coerce")
+            metrics.loc["gated", "cost_bps_applied_mean"] = (
+                float(cost_series.mean()) if not cost_series.dropna().empty else float("nan")
+            )
 
     return {
         "signal_frame": signal_frame,
@@ -413,6 +583,9 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     signal_path = tables_dir / "signal_frame.parquet"
     proxy_path = tables_dir / "stablecoin_proxy_components.parquet"
     safety_diag_path = tables_dir / "safety_diagnostics.csv"
+    edge_net_curve_path = tables_dir / "edge_net_size_curve.csv"
+    break_even_curve_path = tables_dir / "break_even_premium_curve.csv"
+    edge_net_summary_path = tables_dir / "edge_net_summary.csv"
 
     results["gated_log"].to_csv(gated_path, index=True)
     results["naive_log"].to_csv(naive_path, index=True)
@@ -448,6 +621,11 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     )
     safety_diag.to_csv(safety_diag_path, index=False)
 
+    unifier_artifacts = _build_unifier_artifacts(signal_frame)
+    unifier_artifacts["edge_net_size_curve"].to_csv(edge_net_curve_path, index=False)
+    unifier_artifacts["break_even_premium_curve"].to_csv(break_even_curve_path, index=False)
+    unifier_artifacts["edge_net_summary"].to_csv(edge_net_summary_path, index=False)
+
     plot_cfg = _build_dataclass(PlotConfig, config.get("plots"))
     fig1 = plot_figure_1_timeline(
         signal_frame,
@@ -465,6 +643,11 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
         plot_cfg,
         entry_k=float(config.get("strategy", {}).get("entry_k", 2.0)),
     )
+    fig4 = plot_figure_4_edge_net(
+        signal_frame,
+        figures_dir / "figure_4_edge_net.png",
+        plot_cfg,
+    )
 
     return {
         "metrics": metrics_path,
@@ -473,9 +656,13 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
         "signal_frame": signal_path,
         "proxy_components": proxy_path,
         "safety_diagnostics": safety_diag_path,
+        "edge_net_size_curve": edge_net_curve_path,
+        "break_even_premium_curve": break_even_curve_path,
+        "edge_net_summary": edge_net_summary_path,
         "figure_1": fig1,
         "figure_2": fig2,
         "figure_3": fig3,
+        "figure_4": fig4,
     }
 
 

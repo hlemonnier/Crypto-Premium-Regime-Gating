@@ -111,6 +111,26 @@ strategy:
   hawkes_risk_off_quantile: 0.95
   hawkes_widen_threshold: 0.7
   hawkes_risk_off_threshold: 0.85
+execution_unifier:
+  enabled: true
+  slippage_curve_path: reports/final/execution_slippage_vs_size.csv
+  min_history: 120
+  min_regime_history: 60
+  edge_bins: 12
+  horizon_min_bars: 5
+  horizon_max_bars: 60
+  horizon_default_bars: 20
+  horizon_estimation_min_obs: 30
+  size_grid_step: 0.05
+  trade_min_size: 0.1
+  widen_floor_size: 0.25
+  spread_roundtrip_bps:
+  fees_roundtrip_bps:
+  fallback_linear_slippage_bps: 1.0
+  transient_cost_multiplier: 1.0
+  stress_cost_multiplier: 1.35
+  slippage_root: BTC
+  slippage_quote_preference: USDT
 backtest:
   cost_bps: 1.0
   naive_threshold: 0.001
@@ -119,6 +139,7 @@ backtest:
   exit_on_mean_reversion: true
   min_holding_bars: 5
   max_holding_bars:
+  widen_floor_size: 0.25
 outputs:
   tables_dir: reports/tables
   figures_dir: reports/figures

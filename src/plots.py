@@ -228,3 +228,94 @@ def plot_figure_3_phase_space(
     fig.savefig(out)
     plt.close(fig)
     return out
+
+
+def _extract_size_curve_columns(frame: pd.DataFrame, prefix: str) -> list[tuple[float, str]]:
+    marker = f"{prefix}_s"
+    out: list[tuple[float, str]] = []
+    for col in frame.columns:
+        if not str(col).startswith(marker):
+            continue
+        token = str(col)[len(marker) :]
+        if len(token) == 0 or (not token.isdigit()):
+            continue
+        size = float(int(token)) / 100.0
+        out.append((size, str(col)))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def plot_figure_4_edge_net(frame: pd.DataFrame, output_path: str | Path, cfg: PlotConfig) -> Path:
+    expected_cols = _extract_size_curve_columns(frame, "expected_net_pnl_bps")
+    break_even_cols = _extract_size_curve_columns(frame, "break_even_premium_bps")
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if len(expected_cols) == 0 and len(break_even_cols) == 0:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 4), dpi=cfg.dpi)
+        ax.text(
+            0.5,
+            0.5,
+            "Execution unifier disabled or unavailable",
+            ha="center",
+            va="center",
+            fontsize=12,
+            color="#555555",
+        )
+        ax.set_axis_off()
+        fig.tight_layout()
+        fig.savefig(out)
+        plt.close(fig)
+        return out
+
+    regimes = frame.get("regime", pd.Series("unknown", index=frame.index)).astype(str)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), dpi=cfg.dpi)
+
+    if len(expected_cols) > 0:
+        sizes = [size for size, _ in expected_cols]
+        expected_matrix = pd.DataFrame(
+            {size: pd.to_numeric(frame[col], errors="coerce") for size, col in expected_cols},
+            index=frame.index,
+        )
+        for regime_label, color in (("transient", "#003f5c"), ("stress", "#d62728"), ("all", "#2f4b7c")):
+            if regime_label == "all":
+                subset = expected_matrix
+            else:
+                subset = expected_matrix.loc[regimes.eq(regime_label)]
+                if subset.empty:
+                    continue
+            med = subset.median(axis=0, skipna=True)
+            ax1.plot(sizes, med.values, label=regime_label, linewidth=1.8, color=color)
+        ax1.axhline(0.0, color="#808080", linestyle="--", linewidth=1.0, alpha=0.8)
+
+    ax1.set_title("Figure 4A - Size vs Expected Net PnL")
+    ax1.set_xlabel("normalized size")
+    ax1.set_ylabel("expected net pnl (bps)")
+    ax1.grid(alpha=0.2)
+    ax1.legend(loc="best")
+
+    if len(break_even_cols) > 0:
+        sizes = [size for size, _ in break_even_cols]
+        break_matrix = pd.DataFrame(
+            {size: pd.to_numeric(frame[col], errors="coerce") for size, col in break_even_cols},
+            index=frame.index,
+        )
+        for regime_label, color in (("transient", "#003f5c"), ("stress", "#d62728"), ("all", "#2f4b7c")):
+            if regime_label == "all":
+                subset = break_matrix
+            else:
+                subset = break_matrix.loc[regimes.eq(regime_label)]
+                if subset.empty:
+                    continue
+            med = subset.median(axis=0, skipna=True)
+            ax2.plot(sizes, med.values, label=regime_label, linewidth=1.8, color=color)
+
+    ax2.set_title("Figure 4B - Size vs Break-even Premium")
+    ax2.set_xlabel("normalized size")
+    ax2.set_ylabel("break-even premium (bps)")
+    ax2.grid(alpha=0.2)
+    ax2.legend(loc="best")
+
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+    return out

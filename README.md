@@ -448,6 +448,10 @@ Main final artifacts:
 - `reports/final/figures/pnl_naive_vs_gated.png`
 - `reports/final/figures/fliprate_naive_vs_gated.png`
 - `reports/final/execution_slippage_proxy.csv`
+- `reports/final/edge_net_size_curve.csv`
+- `reports/final/break_even_premium_curve.csv`
+- `reports/final/edge_net_summary.csv`
+- `reports/final/figures/figure_4_edge_net.png`
 - `reports/final/execution_cross_quote_comparison.csv`
 - `reports/final/execution_resilience.csv`
 - `reports/final/execution_venue_comparison.csv`
@@ -460,9 +464,13 @@ Main final artifacts:
 - `reports/tables/trade_log_naive.csv`
 - `reports/tables/signal_frame.parquet`
 - `reports/tables/safety_diagnostics.csv`
+- `reports/tables/edge_net_size_curve.csv`
+- `reports/tables/break_even_premium_curve.csv`
+- `reports/tables/edge_net_summary.csv`
 - `reports/figures/figure_1_timeline.png`
 - `reports/figures/figure_2_panel.png`
 - `reports/figures/figure_3_phase_space.png`
+- `reports/figures/figure_4_edge_net.png`
 
 Metric convention in `metrics.csv`:
 - `sharpe` is computed on the full `net_pnl` series and is **non-annualized** (primary score for short episodes).
@@ -490,22 +498,24 @@ Priority order:
    - adaptive mode (`strategy.hawkes_threshold_mode: expanding|rolling`): causal quantile thresholds from `n(t)` history
    - when quality fails, Hawkes gating is disabled for decisions and reason is written to `hawkes_quality_reason`
 5. Else transient mode:
-   - `Trade` only if `|m_t| > k * T_t * sigma_hat` (unit-consistent implementation)
-   - `Widen` when high `T_t` or `chi_t`
-6. Confidence-based sizing on top of discrete decisions:
-   - `confidence_score` in `[0, 1]` combines distance-to-threshold with penalties from outlier events and stress context
-   - `position_size = confidence_score` on `Trade`, `0` otherwise
+   - if `execution_unifier.enabled: true`, compute causal `edge_gross_bps - cost_bps(size, regime)` and choose `optimal_size` on a size grid.
+   - `Trade` only when `expected_net_pnl_opt_bps > 0` and `optimal_size >= execution_unifier.trade_min_size`.
+   - if unifier is disabled, fallback remains `|m_t| > k * T_t * sigma_hat`.
+6. Sizing policy:
+   - `Trade` uses `position_size = optimal_size` (or legacy confidence size if unifier disabled).
+   - `Widen` sets a floor target (`execution_unifier.widen_floor_size`) and stateful backtest reduces open size non-increasingly toward that floor.
 
 Backtest execution policy (default):
 - `position_mode: stateful` (multi-bar holding)
 - enter on `Trade` with side from `sign(m_t)`
-- apply confidence-based size (`position_size`) to convert sign position into effective position
+- apply unifier sizing (`optimal_size`) when enabled; confidence sizing remains as legacy fallback
 - hold at least `min_holding_bars` after entry; `Widen` is not a flat order by default
 - exit on `Widen` only when `backtest.exit_on_widen: true` (legacy-compatible opt-in)
 - exit immediately on `Risk-off` or mean-reversion (`m_t` crossing 0 versus held side)
 - in `stateful` mode, the effective `position_size` is persistent while a position is open:
   positive new size updates exposure; missing/zero size keeps the last active size until exit/flip
 - turnover/costs include entries, exits, and flips (`|Δposition|`)
+- gated backtests can use dynamic per-bar costs from unifier (`edge_cost_bps_opt`) while naive keeps fixed `backtest.cost_bps`
 - PnL convention: `gross_pnl[t] = position[t-1] * (-(premium[t]-premium[t-1]))` on log-premium.
   This corresponds to mean-reversion on the premium spread (`short premium` profits when premium narrows).
 

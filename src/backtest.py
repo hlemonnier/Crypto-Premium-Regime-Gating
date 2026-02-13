@@ -16,6 +16,7 @@ class BacktestConfig:
     exit_on_mean_reversion: bool = True
     min_holding_bars: int = 5
     max_holding_bars: int | None = None
+    widen_floor_size: float = 0.25
 
 
 def periods_per_year_from_freq(freq: str) -> float:
@@ -147,17 +148,23 @@ def _effective_stateful_size(
     pos_sign: pd.Series,
     size_signal: pd.Series,
     *,
+    decision: pd.Series,
     fallback_size: float = 1.0,
+    widen_floor_size: float | None = None,
 ) -> pd.Series:
     fallback = float(np.clip(float(fallback_size), 0.0, 1.0))
+    widen_floor = None if widen_floor_size is None else float(np.clip(float(widen_floor_size), 0.0, 1.0))
+
     sign_values = pd.to_numeric(pos_sign, errors="coerce").fillna(0.0).to_numpy(dtype=float)
     signal_values = pd.to_numeric(size_signal, errors="coerce").clip(lower=0.0, upper=1.0).to_numpy(dtype=float)
+    decision_values = decision.astype(str).to_numpy(dtype=object)
     effective = np.zeros(len(sign_values), dtype=float)
 
     prev_sign = 0.0
     current_size = 0.0
-    for i, (sign_i, signal_i) in enumerate(zip(sign_values, signal_values)):
+    for i, (sign_i, signal_i, decision_i) in enumerate(zip(sign_values, signal_values, decision_values)):
         sign_i = float(sign_i)
+        decision_str = str(decision_i)
         entered_or_flipped = (prev_sign == 0.0 and sign_i != 0.0) or (
             prev_sign != 0.0 and sign_i != 0.0 and np.sign(prev_sign) != np.sign(sign_i)
         )
@@ -175,6 +182,12 @@ def _effective_stateful_size(
                 current_size = float(signal_i)
             elif current_size <= 0.0:
                 current_size = fallback
+
+        if sign_i != 0.0 and decision_str == "Widen" and widen_floor is not None:
+            if current_size <= 0.0:
+                current_size = min(fallback, widen_floor)
+            else:
+                current_size = min(current_size, widen_floor)
 
         effective[i] = current_size if sign_i != 0.0 else 0.0
         prev_sign = sign_i
@@ -215,11 +228,16 @@ def run_backtest(
     freq: str,
     cost_bps: float,
     position_size: pd.Series | None = None,
+    dynamic_cost_bps: pd.Series | None = None,
     position_mode: str = "stateful",
     exit_on_widen: bool = False,
     exit_on_mean_reversion: bool = True,
     min_holding_bars: int = 5,
     max_holding_bars: int | None = None,
+    widen_floor_size: float | None = None,
+    expected_edge_bps: pd.Series | None = None,
+    expected_cost_bps: pd.Series | None = None,
+    expected_net_bps: pd.Series | None = None,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     p = premium.astype(float).copy()
     mode = str(position_mode).strip().lower()
@@ -239,7 +257,12 @@ def run_backtest(
         size = pd.to_numeric(position_size.reindex(pos_sign.index), errors="coerce")
         size = size.clip(lower=0.0, upper=1.0)
     if mode == "stateful":
-        size = _effective_stateful_size(pos_sign, size).rename("position_size")
+        size = _effective_stateful_size(
+            pos_sign,
+            size,
+            decision=decision,
+            widen_floor_size=widen_floor_size,
+        ).rename("position_size")
     else:
         size = size.fillna(0.0).where(pos_sign.ne(0.0), 0.0).rename("position_size")
     pos = (pos_sign * size).rename("position")
@@ -251,7 +274,14 @@ def run_backtest(
     dp = p.diff().fillna(0.0)
     gross_pnl = (pos.shift(1).fillna(0.0) * (-dp)).rename("gross_pnl")
     turnover = pos.diff().abs().fillna(pos.abs()).rename("turnover")
-    costs = (turnover * (cost_bps * 1e-4)).rename("costs")
+
+    if dynamic_cost_bps is None:
+        cost_bps_applied = pd.Series(float(cost_bps), index=pos.index, dtype="float64", name="cost_bps_applied")
+    else:
+        cost_bps_applied = pd.to_numeric(dynamic_cost_bps.reindex(pos.index), errors="coerce")
+        cost_bps_applied = cost_bps_applied.fillna(float(cost_bps)).clip(lower=0.0).rename("cost_bps_applied")
+
+    costs = (turnover * (cost_bps_applied * 1e-4)).rename("costs")
     net_pnl = (gross_pnl - costs).rename("net_pnl")
     cum_pnl = net_pnl.cumsum().rename("cum_pnl")
     drawdown = (cum_pnl - cum_pnl.cummax()).rename("drawdown")
@@ -262,6 +292,7 @@ def run_backtest(
             position_frame,
             decision.rename("decision"),
             gross_pnl,
+            cost_bps_applied,
             costs,
             net_pnl,
             cum_pnl,
@@ -270,6 +301,17 @@ def run_backtest(
         axis=1,
     )
     out.index.name = "timestamp_utc"
+
+    entry_mask = out["position_event"].isin(["Entry", "Flip"])
+    if expected_edge_bps is not None:
+        expected_edge = pd.to_numeric(expected_edge_bps.reindex(out.index), errors="coerce")
+        out["expected_edge_bps_entry"] = expected_edge.where(entry_mask)
+    if expected_cost_bps is not None:
+        expected_cost = pd.to_numeric(expected_cost_bps.reindex(out.index), errors="coerce")
+        out["expected_cost_bps_entry"] = expected_cost.where(entry_mask)
+    if expected_net_bps is not None:
+        expected_net = pd.to_numeric(expected_net_bps.reindex(out.index), errors="coerce")
+        out["expected_net_bps_entry"] = expected_net.where(entry_mask)
 
     in_market = pos.shift(1).abs() > 0
     active_mask = in_market & net_pnl.notna()
@@ -311,6 +353,12 @@ def run_backtest(
         horizon_seconds = (p.index[-1] - p.index[0]).total_seconds()
         horizon_days = float(max(horizon_seconds, 0.0) / (24 * 3600))
 
+    traded_cost_mask = turnover > 0.0
+    if bool(traded_cost_mask.any()):
+        cost_bps_applied_mean = float(cost_bps_applied.loc[traded_cost_mask].mean())
+    else:
+        cost_bps_applied_mean = float(cost_bps_applied.mean())
+
     metrics = {
         # Primary Sharpe is full-series and non-annualized for short-horizon comparability.
         "sharpe": sharpe_full,
@@ -330,6 +378,7 @@ def run_backtest(
         "n_active_bars": int(active_mask.sum()),
         "horizon_days": horizon_days,
         "annualization_factor": float(annualization),
+        "cost_bps_applied_mean": cost_bps_applied_mean,
     }
     return out, metrics
 
@@ -351,6 +400,10 @@ def compare_strategies(
     decision_gated: pd.Series,
     m_t: pd.Series,
     size_gated: pd.Series | None = None,
+    dynamic_cost_gated: pd.Series | None = None,
+    expected_edge_gated: pd.Series | None = None,
+    expected_cost_gated: pd.Series | None = None,
+    expected_net_gated: pd.Series | None = None,
     freq: str,
     cfg: BacktestConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -361,11 +414,16 @@ def compare_strategies(
         freq=freq,
         cost_bps=cfg.cost_bps,
         position_size=size_gated,
+        dynamic_cost_bps=dynamic_cost_gated,
         position_mode=cfg.position_mode,
         exit_on_widen=cfg.exit_on_widen,
         exit_on_mean_reversion=cfg.exit_on_mean_reversion,
         min_holding_bars=cfg.min_holding_bars,
         max_holding_bars=cfg.max_holding_bars,
+        widen_floor_size=cfg.widen_floor_size,
+        expected_edge_bps=expected_edge_gated,
+        expected_cost_bps=expected_cost_gated,
+        expected_net_bps=expected_net_gated,
     )
     naive_signal = run_naive_baseline(p_naive, threshold=cfg.naive_threshold)
     naive_log, naive_metrics = run_backtest(

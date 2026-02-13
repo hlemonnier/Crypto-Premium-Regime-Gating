@@ -253,6 +253,11 @@ def main() -> None:
         "n_active_bars",
         "horizon_days",
         "avg_active_position_size",
+        "edge_net_trade_median_bps",
+        "edge_net_trade_p10_bps",
+        "optimal_size_trade_mean",
+        "break_even_premium_median_bps",
+        "cost_bps_applied_mean",
     ]
     optional_cols = [
         "sharpe_full_annualized",
@@ -294,6 +299,10 @@ def main() -> None:
     calibration_exists = calibration_details_path.exists() and calibration_agg_path.exists()
     execution_report_path = output_dir / "execution_quality_report.md"
     execution_slippage_path = output_dir / "execution_slippage_proxy.csv"
+    edge_net_curve_path = output_dir / "edge_net_size_curve.csv"
+    break_even_curve_path = output_dir / "break_even_premium_curve.csv"
+    edge_net_summary_path = output_dir / "edge_net_summary.csv"
+    edge_net_figure_path = output_dir / "figures" / "figure_4_edge_net.png"
     execution_comparison_path = output_dir / "execution_cross_quote_comparison.csv"
     execution_resilience_path = output_dir / "execution_resilience.csv"
     execution_venue_path = output_dir / "execution_venue_comparison.csv"
@@ -542,6 +551,14 @@ def main() -> None:
             handle.write(f"- `{execution_l2_coverage_path}`\n")
         if execution_slippage_path.exists():
             handle.write(f"- `{execution_slippage_path}`\n")
+        if edge_net_curve_path.exists():
+            handle.write(f"- `{edge_net_curve_path}`\n")
+        if break_even_curve_path.exists():
+            handle.write(f"- `{break_even_curve_path}`\n")
+        if edge_net_summary_path.exists():
+            handle.write(f"- `{edge_net_summary_path}`\n")
+        if edge_net_figure_path.exists():
+            handle.write(f"- `{edge_net_figure_path}`\n")
         if execution_comparison_path.exists():
             handle.write(f"- `{execution_comparison_path}`\n")
         if execution_resilience_path.exists():

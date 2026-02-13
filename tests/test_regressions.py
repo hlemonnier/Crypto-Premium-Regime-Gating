@@ -29,7 +29,7 @@ from src.pipeline import _prepare_frame_for_parquet, export_outputs, load_config
 from src.premium import PremiumConfig, build_premium_frame, compute_depeg_flag
 from src.regimes import build_regime_score
 from src.robust_filter import robust_filter
-from src.strategy import StrategyConfig, build_decisions
+from src.strategy import ExecutionUnifierConfig, StrategyConfig, build_decisions
 from src.thresholds import quantile_threshold
 
 
@@ -773,6 +773,200 @@ class ConfidenceSizingTests(unittest.TestCase):
         self.assertLess(float(size.loc[idx[2]]), float(size.loc[idx[3]]))
 
 
+class ExecutionUnifierTests(unittest.TestCase):
+    def _build_unifier_inputs(self, n: int = 260) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
+        idx = pd.date_range("2024-01-01", periods=n, freq="1min", tz="UTC")
+        x = np.linspace(0.0, 24.0, n)
+        premium = pd.Series(5e-4 * np.sin(x) + 2e-4 * np.sin(3.0 * x), index=idx, name="premium")
+        m_t = premium.rolling(5, min_periods=1).mean().rename("m_t")
+        T_t = pd.Series(1.0, index=idx, name="T_t")
+        chi_t = pd.Series(0.0, index=idx, name="chi_t")
+        regime = pd.Series("transient", index=idx, name="regime")
+        depeg_flag = pd.Series(False, index=idx, name="depeg_flag")
+        return premium, m_t, T_t, chi_t, regime, depeg_flag
+
+    def test_unifier_prefix_invariance_is_causal(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        cfg = StrategyConfig(entry_k=50.0, threshold_min_periods=10_000)
+        ucfg = ExecutionUnifierConfig(
+            enabled=True,
+            min_history=25,
+            min_regime_history=10,
+            edge_bins=6,
+            horizon_min_bars=5,
+            horizon_max_bars=10,
+            horizon_default_bars=6,
+            horizon_estimation_min_obs=10,
+            size_grid_step=0.5,
+            spread_roundtrip_bps=0.0,
+            fees_roundtrip_bps=0.0,
+            fallback_linear_slippage_bps=0.1,
+        )
+
+        full = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ucfg,
+            cfg=cfg,
+        )
+        prefix_n = 180
+        prefix = build_decisions(
+            m_t=m_t.iloc[:prefix_n],
+            T_t=T_t.iloc[:prefix_n],
+            chi_t=chi_t.iloc[:prefix_n],
+            regime=regime.iloc[:prefix_n],
+            depeg_flag=depeg_flag.iloc[:prefix_n],
+            premium=premium.iloc[:prefix_n],
+            execution_unifier_cfg=ucfg,
+            cfg=cfg,
+        )
+
+        np.testing.assert_allclose(
+            pd.to_numeric(full["edge_gross_bps"].iloc[:prefix_n], errors="coerce").to_numpy(dtype=float),
+            pd.to_numeric(prefix["edge_gross_bps"], errors="coerce").to_numpy(dtype=float),
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            pd.to_numeric(full["optimal_size"].iloc[:prefix_n], errors="coerce").to_numpy(dtype=float),
+            pd.to_numeric(prefix["optimal_size"], errors="coerce").to_numpy(dtype=float),
+            equal_nan=True,
+        )
+
+    def test_unifier_fallback_linear_source_when_curve_missing(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(enabled=True),
+            cfg=StrategyConfig(entry_k=50.0, threshold_min_periods=10_000),
+        )
+        self.assertTrue(bool(out["cost_model_source"].astype(str).eq("fallback_linear").all()))
+
+    def test_break_even_curve_is_monotone_by_size(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(
+                enabled=True,
+                size_grid_step=0.25,
+                spread_roundtrip_bps=0.0,
+                fees_roundtrip_bps=0.0,
+                fallback_linear_slippage_bps=0.1,
+            ),
+            cfg=StrategyConfig(entry_k=50.0, threshold_min_periods=10_000),
+        )
+
+        cols = [c for c in out.columns if str(c).startswith("break_even_premium_bps_s")]
+        cols = sorted(cols, key=lambda c: int(str(c).split("_s")[-1]))
+        tail = out.iloc[-1]
+        values = pd.to_numeric(tail[cols], errors="coerce").to_numpy(dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size > 1:
+            diffs = np.diff(finite)
+            self.assertTrue(bool((diffs >= -1e-12).all()))
+
+    def test_unifier_trade_gate_responds_to_cost_level(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        cfg = StrategyConfig(entry_k=50.0, threshold_min_periods=10_000)
+
+        high_cost = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(
+                enabled=True,
+                spread_roundtrip_bps=50.0,
+                fees_roundtrip_bps=50.0,
+                fallback_linear_slippage_bps=50.0,
+            ),
+            cfg=cfg,
+        )
+        low_cost = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(
+                enabled=True,
+                spread_roundtrip_bps=0.0,
+                fees_roundtrip_bps=0.0,
+                fallback_linear_slippage_bps=0.01,
+            ),
+            cfg=cfg,
+        )
+        self.assertFalse(bool(high_cost["decision"].astype(str).eq("Trade").any()))
+        self.assertTrue(bool(low_cost["decision"].astype(str).eq("Trade").any()))
+
+    def test_riskoff_override_has_priority_when_unifier_enabled(self) -> None:
+        premium, m_t, T_t, chi_t, regime, _ = self._build_unifier_inputs()
+        depeg_flag = pd.Series(True, index=m_t.index, name="depeg_flag")
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(
+                enabled=True,
+                spread_roundtrip_bps=0.0,
+                fees_roundtrip_bps=0.0,
+                fallback_linear_slippage_bps=0.01,
+            ),
+            cfg=StrategyConfig(entry_k=50.0, threshold_min_periods=10_000),
+        )
+        self.assertTrue(bool(out["decision"].astype(str).eq("Risk-off").all()))
+        self.assertTrue(bool((pd.to_numeric(out["position_size"], errors="coerce").fillna(0.0) == 0.0).all()))
+
+    def test_unifier_disabled_preserves_legacy_decision_path(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        cfg = StrategyConfig(entry_k=2.0, threshold_min_periods=10_000)
+        legacy = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=pd.Series(0.01, index=m_t.index, name="sigma_hat"),
+            regime=regime,
+            depeg_flag=depeg_flag,
+            cfg=cfg,
+        )
+        disabled = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            sigma_hat=pd.Series(0.01, index=m_t.index, name="sigma_hat"),
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=ExecutionUnifierConfig(enabled=False),
+            cfg=cfg,
+        )
+        pd.testing.assert_series_equal(legacy["decision"], disabled["decision"])
+        np.testing.assert_allclose(
+            pd.to_numeric(legacy["position_size"], errors="coerce").to_numpy(dtype=float),
+            pd.to_numeric(disabled["position_size"], errors="coerce").to_numpy(dtype=float),
+            equal_nan=True,
+        )
+
+
 class PositionSizingBacktestTests(unittest.TestCase):
     def test_position_size_scales_pnl_and_turnover(self) -> None:
         idx = pd.date_range("2024-01-01", periods=3, freq="1min", tz="UTC")
@@ -802,6 +996,57 @@ class PositionSizingBacktestTests(unittest.TestCase):
         self.assertAlmostEqual(float(half_log["net_pnl"].sum()), 0.5 * float(full_log["net_pnl"].sum()), places=12)
         self.assertAlmostEqual(float(half_metrics["turnover"]), 0.5 * float(full_metrics["turnover"]), places=12)
         self.assertAlmostEqual(float(half_metrics["avg_active_position_size"]), 0.5, places=12)
+
+    def test_dynamic_cost_series_is_applied_bar_by_bar(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=3, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 1.0, 0.0], index=idx, name="premium")
+        decision = pd.Series(["Widen", "Trade", "Widen"], index=idx, name="decision")
+        m_t = pd.Series([0.0, 1.0, 0.0], index=idx, name="m_t")
+        dynamic_cost = pd.Series([1.0, 10.0, 100.0], index=idx, name="dynamic_cost_bps")
+
+        log, _ = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            dynamic_cost_bps=dynamic_cost,
+            position_mode="one_bar",
+        )
+
+        self.assertAlmostEqual(float(log.loc[idx[1], "costs"]), 10.0 * 1e-4, places=12)
+        self.assertAlmostEqual(float(log.loc[idx[2], "costs"]), 100.0 * 1e-4, places=12)
+        self.assertAlmostEqual(float(log["costs"].sum()), (10.0 + 100.0) * 1e-4, places=12)
+        np.testing.assert_allclose(
+            pd.to_numeric(log["cost_bps_applied"], errors="coerce").to_numpy(dtype=float),
+            dynamic_cost.to_numpy(dtype=float),
+        )
+
+    def test_stateful_widen_floor_reduces_size_non_increasingly(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=4, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 1.0, 1.2, 1.1], index=idx, name="premium")
+        decision = pd.Series(["Trade", "Widen", "Widen", "Widen"], index=idx, name="decision")
+        m_t = pd.Series([1.0, 1.0, 1.0, 1.0], index=idx, name="m_t")
+        size_signal = pd.Series([0.8, 0.9, 1.0, 1.0], index=idx, name="position_size")
+
+        log, _ = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_size=size_signal,
+            position_mode="stateful",
+            exit_on_widen=False,
+            widen_floor_size=0.25,
+            min_holding_bars=1,
+            exit_on_mean_reversion=False,
+        )
+        expected_size = pd.Series([0.8, 0.25, 0.25, 0.25], index=idx)
+        np.testing.assert_allclose(
+            pd.to_numeric(log["position_size"], errors="coerce").to_numpy(dtype=float),
+            expected_size.to_numpy(dtype=float),
+        )
 
 
 class PriceMatrixLoaderTests(unittest.TestCase):
@@ -906,6 +1151,42 @@ class ExportDiagnosticsTests(unittest.TestCase):
             self.assertEqual(str(safety_diag.loc[0, "expected_index_delta"]), "0 days 00:01:00")
             self.assertEqual(str(safety_diag.loc[0, "observed_index_delta"]), "0 days 00:01:00")
             self.assertTrue(bool(safety_diag.loc[0, "index_delta_matches_config"]))
+
+    def test_export_outputs_writes_unifier_artifacts_and_figure4(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=260, freq="1min", tz="UTC", name="timestamp_utc")
+        base = pd.Series(np.linspace(1.0, 1.02, len(idx)), index=idx)
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": 50_000.0 * base * np.exp(1e-4 * np.sin(np.linspace(0.0, 10.0, len(idx)))),
+                "BTCUSDT-PERP": 50_000.0 * base,
+                "ETHUSDC-PERP": 2_500.0 * base,
+                "ETHUSDT-PERP": 2_500.0 * (base + 1e-6),
+            },
+            index=idx,
+        )
+        config = load_config("configs/config.yaml")
+        run_cfg = deepcopy(config)
+        run_cfg["onchain"] = {"enabled": False}
+        run_cfg.setdefault("data", {})
+        run_cfg["data"]["resample_rule"] = "1min"
+        run_cfg.setdefault("execution_unifier", {})
+        run_cfg["execution_unifier"]["enabled"] = True
+        run_cfg["execution_unifier"]["spread_roundtrip_bps"] = 0.0
+        run_cfg["execution_unifier"]["fees_roundtrip_bps"] = 0.0
+        run_cfg["execution_unifier"]["fallback_linear_slippage_bps"] = 0.01
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tables_dir = Path(tmp_dir) / "tables"
+            figures_dir = Path(tmp_dir) / "figures"
+            run_cfg["outputs"] = {"tables_dir": str(tables_dir), "figures_dir": str(figures_dir)}
+
+            results = run_pipeline(run_cfg, matrix)
+            exported = export_outputs(results, run_cfg)
+
+            self.assertTrue(Path(exported["edge_net_size_curve"]).exists())
+            self.assertTrue(Path(exported["break_even_premium_curve"]).exists())
+            self.assertTrue(Path(exported["edge_net_summary"]).exists())
+            self.assertTrue(Path(exported["figure_4"]).exists())
 
 
 class DataIngestTimestampTests(unittest.TestCase):
