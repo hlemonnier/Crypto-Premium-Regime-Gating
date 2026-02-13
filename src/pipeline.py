@@ -217,6 +217,7 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
         ],
         axis=1,
     )
+    signal_frame = signal_frame.loc[:, ~signal_frame.columns.duplicated(keep="first")]
     signal_frame = signal_frame.loc[~signal_frame.index.duplicated(keep="last")]
     signal_frame = signal_frame.sort_index()
 

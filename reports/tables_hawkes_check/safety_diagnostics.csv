@@ -1,0 +1,2 @@
+depeg_bars,riskoff_bars,depeg_without_riskoff_bars,hawkes_quality_pass,hawkes_quality_reason,onchain_stale_ratio
+1517,1557,0,True,ok,0.0

@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import numpy as np
@@ -21,7 +22,7 @@ from src.execution_quality import (
 )
 from src.hawkes import HawkesConfig, evaluate_hawkes_quality
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
-from src.pipeline import load_config, load_price_matrix, run_pipeline
+from src.pipeline import export_outputs, load_config, load_price_matrix, run_pipeline
 from src.premium import PremiumConfig, build_premium_frame, compute_depeg_flag
 from src.regimes import build_regime_score
 from src.robust_filter import robust_filter
@@ -401,6 +402,51 @@ class HawkesQualityTests(unittest.TestCase):
         signal = run_pipeline(run_cfg, matrix)["signal_frame"]
         self.assertFalse(bool(signal["hawkes_quality_pass"].iloc[0]))
         self.assertFalse(bool(signal["hawkes_riskoff_signal"].astype(bool).any()))
+
+    def test_hawkes_enabled_signal_frame_exports_to_parquet_without_duplicate_columns(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=600, freq="1min", tz="UTC")
+        base = pd.Series(np.linspace(1.0, 1.02, len(idx)), index=idx)
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDC-PERP": 50000.0 * base,
+                "BTCUSDT-PERP": 50000.0 * (base + 1e-6),
+                "ETHUSDC-PERP": 2500.0 * base,
+                "ETHUSDT-PERP": 2500.0 * (base + 1e-6),
+                "SOLUSDC-PERP": 80.0 * base,
+                "SOLUSDT-PERP": 80.0 * (base + 1e-6),
+                "BNBUSDC-PERP": 400.0 * base,
+                "BNBUSDT-PERP": 400.0 * (base + 1e-6),
+            },
+            index=idx,
+        )
+        config = load_config("configs/config.yaml")
+        run_cfg = deepcopy(config)
+        run_cfg.setdefault("hawkes", {})
+        run_cfg["hawkes"]["enabled"] = True
+        run_cfg["onchain"] = {"enabled": False}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tables_dir = Path(tmp_dir) / "tables"
+            figures_dir = Path(tmp_dir) / "figures"
+            run_cfg["outputs"] = {"tables_dir": str(tables_dir), "figures_dir": str(figures_dir)}
+
+            results = run_pipeline(run_cfg, matrix)
+            signal = results["signal_frame"]
+            self.assertFalse(bool(signal.columns.duplicated().any()))
+
+            def _fake_to_parquet(frame: pd.DataFrame, path: Path | str, *args: object, **kwargs: object) -> None:
+                duplicate_cols = frame.columns[frame.columns.duplicated()].tolist()
+                if duplicate_cols:
+                    raise ValueError(f"Duplicate column names found: {duplicate_cols}")
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_bytes(b"PAR1")
+
+            with patch.object(pd.DataFrame, "to_parquet", autospec=True, side_effect=_fake_to_parquet):
+                exported = export_outputs(results, run_cfg)
+            signal_path = Path(exported["signal_frame"])
+            self.assertEqual(signal_path.suffix, ".parquet")
+            self.assertTrue(signal_path.exists())
+            self.assertFalse((tables_dir / "signal_frame.csv").exists())
 
 
 class StrategyFallbackThresholdTests(unittest.TestCase):
