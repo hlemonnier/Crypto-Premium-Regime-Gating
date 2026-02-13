@@ -598,6 +598,10 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     frequency_consistent = bool(observed_td == expected_td) if observed_td is not None else False
     depeg_flag = signal_frame.get("depeg_flag", pd.Series(False, index=signal_frame.index)).astype(bool)
     riskoff_flag = signal_frame.get("riskoff_flag", pd.Series(False, index=signal_frame.index)).astype(bool)
+    trade_flag = signal_frame.get("decision", pd.Series("", index=signal_frame.index)).astype(str).eq("Trade")
+    trade_signal = signal_frame.get("trade_signal", pd.Series(False, index=signal_frame.index)).astype(bool)
+    entry_threshold = pd.to_numeric(signal_frame.get("entry_threshold", pd.Series(np.nan, index=signal_frame.index)), errors="coerce")
+    temperature = pd.to_numeric(signal_frame.get("T_t", pd.Series(np.nan, index=signal_frame.index)), errors="coerce")
     onchain_stale = signal_frame.get("onchain_data_stale", pd.Series(False, index=signal_frame.index)).astype(bool)
     safety_diag = pd.DataFrame(
         [
@@ -605,6 +609,9 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
                 "depeg_bars": int(depeg_flag.sum()),
                 "riskoff_bars": int(riskoff_flag.sum()),
                 "depeg_without_riskoff_bars": int((depeg_flag & ~riskoff_flag).sum()),
+                "trade_but_trade_signal_false": int((trade_flag & ~trade_signal).sum()),
+                "trade_with_entry_threshold_nan": int((trade_flag & entry_threshold.isna()).sum()),
+                "trade_with_T_t_nan": int((trade_flag & temperature.isna()).sum()),
                 "hawkes_quality_pass": bool(signal_frame.get("hawkes_quality_pass", pd.Series(False)).iloc[0])
                 if not signal_frame.empty
                 else False,

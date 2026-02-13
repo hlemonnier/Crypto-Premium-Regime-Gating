@@ -9,7 +9,7 @@ data:
   single_bar_spike_reversion_log: 0.003
   single_bar_spike_counterpart_max_log: 0.002
   single_bar_spike_min_cross_pairs: 1
-  price_matrix_path: data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv
+  price_matrix_path: data/processed/episodes/bybit_usdc_depeg_2023/prices_matrix.csv
 data_sources:
   binance: https://data.binance.vision/?prefix=data/
   gateio: https://www.gate.com/developer/historical_quotes
@@ -20,6 +20,7 @@ premium:
   target_usdc_symbol: BTCUSDC-PERP
   target_usdt_symbol: BTCUSDT-PERP
   auto_resolve_target_pair: true
+  allow_synthetic_usdc_from_usdt: true
   allow_target_pair_as_proxy: false
   fail_on_missing_proxy: true
   proxy_method: median

@@ -1,2 +1,2 @@
-depeg_bars,riskoff_bars,depeg_without_riskoff_bars,hawkes_quality_pass,hawkes_quality_reason,onchain_stale_ratio,configured_resample_rule,expected_index_delta,observed_index_delta,index_delta_matches_config
-1531,1531,0,True,ok,0.0,1min,0 days 00:01:00,0 days 00:01:00,True
+depeg_bars,riskoff_bars,depeg_without_riskoff_bars,trade_but_trade_signal_false,trade_with_entry_threshold_nan,trade_with_T_t_nan,hawkes_quality_pass,hawkes_quality_reason,onchain_stale_ratio,configured_resample_rule,expected_index_delta,observed_index_delta,index_delta_matches_config
+1531,1531,0,0,0,0,True,ok,0.0,1min,0 days 00:01:00,0 days 00:01:00,True

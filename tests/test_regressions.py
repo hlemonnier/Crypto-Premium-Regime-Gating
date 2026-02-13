@@ -68,6 +68,24 @@ class DataContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No compatible USDC/USDT target pair"):
             build_premium_frame(matrix, PremiumConfig())
 
+    def test_optional_synthetic_usdc_fallback_for_usdt_only_matrix(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=4, freq="1min", tz="UTC")
+        matrix = pd.DataFrame(
+            {
+                "BTCUSDT-PERP": [100.0, 100.2, 100.1, 99.9],
+                "ETHUSDT-PERP": [10.0, 10.1, 10.0, 9.9],
+            },
+            index=idx,
+        )
+        frame, proxy_components = build_premium_frame(
+            matrix,
+            PremiumConfig(allow_synthetic_usdc_from_usdt=True),
+        )
+
+        self.assertTrue(np.allclose(frame["p_naive"].to_numpy(dtype=float), 0.0))
+        self.assertTrue(np.allclose(frame["stablecoin_proxy"].to_numpy(dtype=float), 0.0))
+        self.assertEqual(list(proxy_components.columns), ["ETHUSDC-PERP__ETHUSDT-PERP"])
+
 
 class NoLookaheadTests(unittest.TestCase):
     def test_pw_rolling_proxy_is_causal(self) -> None:
@@ -880,7 +898,7 @@ class ExecutionUnifierTests(unittest.TestCase):
 
     def test_unifier_trade_gate_responds_to_cost_level(self) -> None:
         premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
-        cfg = StrategyConfig(entry_k=50.0, threshold_min_periods=10_000)
+        cfg = StrategyConfig(entry_k=1.0, threshold_min_periods=10_000)
 
         high_cost = build_decisions(
             m_t=m_t,
@@ -914,6 +932,81 @@ class ExecutionUnifierTests(unittest.TestCase):
         )
         self.assertFalse(bool(high_cost["decision"].astype(str).eq("Trade").any()))
         self.assertTrue(bool(low_cost["decision"].astype(str).eq("Trade").any()))
+
+    def test_unifier_trade_requires_entry_signal_and_finite_threshold(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        cfg = StrategyConfig(entry_k=1.0, threshold_min_periods=10_000)
+        unifier_cfg = ExecutionUnifierConfig(
+            enabled=True,
+            spread_roundtrip_bps=0.0,
+            fees_roundtrip_bps=0.0,
+            fallback_linear_slippage_bps=0.01,
+        )
+        baseline = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=unifier_cfg,
+            cfg=cfg,
+        )
+        baseline_trade = baseline["decision"].astype(str).eq("Trade")
+        forced_nan_idx = baseline.index[baseline_trade][:5]
+        self.assertEqual(len(forced_nan_idx), 5)
+
+        T_with_nan = T_t.copy()
+        T_with_nan.loc[forced_nan_idx] = np.nan
+        out = build_decisions(
+            m_t=m_t,
+            T_t=T_with_nan,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=unifier_cfg,
+            cfg=cfg,
+        )
+        trade = out["decision"].astype(str).eq("Trade")
+        trade_signal = out["trade_signal"].astype(bool)
+        entry_threshold = pd.to_numeric(out["entry_threshold"], errors="coerce")
+
+        self.assertFalse(bool((trade & ~trade_signal).any()))
+        self.assertFalse(bool((trade & entry_threshold.isna()).any()))
+        self.assertFalse(bool(trade.loc[forced_nan_idx].any()))
+
+    def test_unifier_trade_count_changes_with_entry_k(self) -> None:
+        premium, m_t, T_t, chi_t, regime, depeg_flag = self._build_unifier_inputs()
+        unifier_cfg = ExecutionUnifierConfig(
+            enabled=True,
+            spread_roundtrip_bps=0.0,
+            fees_roundtrip_bps=0.0,
+            fallback_linear_slippage_bps=0.01,
+        )
+        low_k = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=unifier_cfg,
+            cfg=StrategyConfig(entry_k=0.3, threshold_min_periods=10_000),
+        )
+        high_k = build_decisions(
+            m_t=m_t,
+            T_t=T_t,
+            chi_t=chi_t,
+            regime=regime,
+            depeg_flag=depeg_flag,
+            premium=premium,
+            execution_unifier_cfg=unifier_cfg,
+            cfg=StrategyConfig(entry_k=1.2, threshold_min_periods=10_000),
+        )
+        low_k_trades = int(low_k["decision"].astype(str).eq("Trade").sum())
+        high_k_trades = int(high_k["decision"].astype(str).eq("Trade").sum())
+        self.assertGreater(low_k_trades, high_k_trades)
 
     def test_riskoff_override_has_priority_when_unifier_enabled(self) -> None:
         premium, m_t, T_t, chi_t, regime, _ = self._build_unifier_inputs()
@@ -1147,10 +1240,16 @@ class ExportDiagnosticsTests(unittest.TestCase):
             self.assertIn("expected_index_delta", safety_diag.columns)
             self.assertIn("observed_index_delta", safety_diag.columns)
             self.assertIn("index_delta_matches_config", safety_diag.columns)
+            self.assertIn("trade_but_trade_signal_false", safety_diag.columns)
+            self.assertIn("trade_with_entry_threshold_nan", safety_diag.columns)
+            self.assertIn("trade_with_T_t_nan", safety_diag.columns)
             self.assertEqual(str(safety_diag.loc[0, "configured_resample_rule"]), "1min")
             self.assertEqual(str(safety_diag.loc[0, "expected_index_delta"]), "0 days 00:01:00")
             self.assertEqual(str(safety_diag.loc[0, "observed_index_delta"]), "0 days 00:01:00")
             self.assertTrue(bool(safety_diag.loc[0, "index_delta_matches_config"]))
+            self.assertEqual(int(safety_diag.loc[0, "trade_but_trade_signal_false"]), 0)
+            self.assertEqual(int(safety_diag.loc[0, "trade_with_entry_threshold_nan"]), 0)
+            self.assertEqual(int(safety_diag.loc[0, "trade_with_T_t_nan"]), 0)
 
     def test_export_outputs_writes_unifier_artifacts_and_figure4(self) -> None:
         idx = pd.date_range("2024-01-01", periods=260, freq="1min", tz="UTC", name="timestamp_utc")

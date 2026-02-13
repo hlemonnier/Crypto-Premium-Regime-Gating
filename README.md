@@ -17,7 +17,7 @@ python -m src.pipeline --config configs/config.yaml
 
 Default runnable input already configured in `configs/config.yaml`:
 
-- `data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv`
+- `data/processed/episodes/bybit_usdc_depeg_2023/prices_matrix.csv`
 
 Main outputs after pipeline run:
 

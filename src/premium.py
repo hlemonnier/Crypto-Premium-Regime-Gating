@@ -19,6 +19,7 @@ class PremiumConfig:
     depeg_min_consecutive: int = 5
     min_price: float = 1e-12
     auto_resolve_target_pair: bool = True
+    allow_synthetic_usdc_from_usdt: bool = False
     allow_target_pair_as_proxy: bool = False
     fail_on_missing_proxy: bool = True
     proxy_method: str = "median"
@@ -57,6 +58,41 @@ def _split_symbol(symbol: str) -> tuple[str, str, str] | None:
             suffix = normalized[idx + len(stable) :]
             return root, stable, suffix
     return None
+
+
+def _replace_stable_token(symbol: str, old_token: str, new_token: str) -> str | None:
+    upper = str(symbol).upper()
+    idx = upper.find(str(old_token).upper())
+    if idx < 0:
+        return None
+    old = str(old_token)
+    return f"{symbol[:idx]}{new_token}{symbol[idx + len(old):]}"
+
+
+def synthesize_usdc_legs_from_usdt(
+    price_matrix: pd.DataFrame,
+) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
+    out = price_matrix.copy()
+    available = set(out.columns)
+    created_pairs: list[tuple[str, str]] = []
+
+    for usdt_symbol in list(out.columns):
+        parts = _split_symbol(str(usdt_symbol))
+        if parts is None:
+            continue
+        _, stable, _ = parts
+        if stable != "USDT":
+            continue
+        usdc_symbol = _replace_stable_token(str(usdt_symbol), "USDT", "USDC")
+        if not usdc_symbol:
+            continue
+        if usdc_symbol in available:
+            continue
+        out[usdc_symbol] = out[usdt_symbol].astype(float)
+        available.add(usdc_symbol)
+        created_pairs.append((usdc_symbol, str(usdt_symbol)))
+
+    return out, created_pairs
 
 
 def infer_cross_asset_pairs(
@@ -429,12 +465,37 @@ def build_premium_frame(
     proxy_pairs: Sequence[tuple[str, str]] | None = None,
     freq: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    target_pair = resolve_target_pair(
-        price_matrix,
-        usdc_symbol=cfg.target_usdc_symbol,
-        usdt_symbol=cfg.target_usdt_symbol,
-        auto_resolve=cfg.auto_resolve_target_pair,
-    )
+    working_matrix = price_matrix
+    target_pair: tuple[str, str]
+
+    try:
+        target_pair = resolve_target_pair(
+            working_matrix,
+            usdc_symbol=cfg.target_usdc_symbol,
+            usdt_symbol=cfg.target_usdt_symbol,
+            auto_resolve=cfg.auto_resolve_target_pair,
+        )
+    except ValueError as exc:
+        no_pair_error = "No compatible USDC/USDT target pair found in price matrix."
+        if (not cfg.allow_synthetic_usdc_from_usdt) or (no_pair_error not in str(exc)):
+            raise
+
+        synthesized, created_pairs = synthesize_usdc_legs_from_usdt(price_matrix)
+        if not created_pairs:
+            raise
+        working_matrix = synthesized
+        target_pair = resolve_target_pair(
+            working_matrix,
+            usdc_symbol=cfg.target_usdc_symbol,
+            usdt_symbol=cfg.target_usdt_symbol,
+            auto_resolve=cfg.auto_resolve_target_pair,
+        )
+        warnings.warn(
+            "No native USDC leg detected; synthesized USDC symbols from USDT columns "
+            f"for compatibility ({len(created_pairs)} synthetic pairs).",
+            stacklevel=2,
+        )
+
     if target_pair != (cfg.target_usdc_symbol, cfg.target_usdt_symbol):
         warnings.warn(
             "Configured target pair is unavailable for this episode. "
@@ -442,13 +503,13 @@ def build_premium_frame(
             stacklevel=2,
         )
     p_naive = compute_naive_premium(
-        price_matrix,
+        working_matrix,
         target_pair[0],
         target_pair[1],
         min_price=cfg.min_price,
     ).rename("p_naive")
     stablecoin_proxy, proxy_components = compute_stablecoin_proxy(
-        price_matrix,
+        working_matrix,
         proxy_pairs=proxy_pairs,
         target_pair=target_pair,
         min_price=cfg.min_price,

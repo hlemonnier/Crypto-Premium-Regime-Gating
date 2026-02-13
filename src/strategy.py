@@ -744,14 +744,15 @@ def build_decisions(
         slippage_curve=slippage_curve,
     )
 
+    base_trade_gate = (~riskoff) & (~widen) & trade_signal
     if bool(unifier_cfg.enabled) and premium is not None:
         expected_opt = pd.to_numeric(unifier_frame["expected_net_pnl_opt_bps"], errors="coerce").fillna(0.0)
         optimal_size = pd.to_numeric(unifier_frame["optimal_size"], errors="coerce").clip(lower=0.0, upper=1.0)
         trade_min = float(np.clip(unifier_cfg.trade_min_size, 0.0, 1.0))
         net_edge_trade = expected_opt.gt(0.0) & optimal_size.ge(trade_min) & m_t.notna()
-        trade = (~riskoff) & (~widen) & net_edge_trade
+        trade = base_trade_gate & net_edge_trade
     else:
-        trade = (~riskoff) & (~widen) & trade_signal
+        trade = base_trade_gate
 
     decision.loc[trade] = "Trade"
 
