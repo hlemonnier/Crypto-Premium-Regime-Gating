@@ -38,6 +38,7 @@ premium:
     - BNBUSDT-PERP
 onchain:
   enabled: true
+  fail_closed_on_error: true
   provider: defillama
   stablecoin_prices_url: https://stablecoins.llama.fi/stablecoinprices
   usdc_key: usd-coin

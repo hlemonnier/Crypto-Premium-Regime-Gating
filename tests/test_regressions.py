@@ -22,7 +22,7 @@ from src.execution_quality import (
 )
 from src.hawkes import HawkesConfig, evaluate_hawkes_quality
 from src.onchain import OnchainConfig, build_onchain_validation_frame, empty_onchain_frame
-from src.pipeline import export_outputs, load_config, load_price_matrix, run_pipeline
+from src.pipeline import _prepare_frame_for_parquet, export_outputs, load_config, load_price_matrix, run_pipeline
 from src.premium import PremiumConfig, build_premium_frame, compute_depeg_flag
 from src.regimes import build_regime_score
 from src.robust_filter import robust_filter
@@ -827,6 +827,14 @@ class OnchainColumnsTests(unittest.TestCase):
         self.assertIn("onchain_source_age_hours", frame.columns)
         self.assertIn("onchain_data_stale", frame.columns)
         self.assertIn("onchain_depeg_flag_effective", frame.columns)
+        self.assertIn("onchain_guardrail_fail_closed", frame.columns)
+        self.assertFalse(bool(frame["onchain_guardrail_fail_closed"].astype(bool).any()))
+
+    def test_empty_onchain_frame_can_fail_closed(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=2, freq="1min", tz="UTC")
+        frame = empty_onchain_frame(idx, fail_closed=True)
+        self.assertTrue(bool(frame["onchain_guardrail_fail_closed"].astype(bool).all()))
+        self.assertTrue(bool(frame["onchain_depeg_flag_effective"].astype(bool).all()))
 
 
 class BybitIntervalTests(unittest.TestCase):
@@ -923,6 +931,53 @@ class OnchainCadenceTests(unittest.TestCase):
             self.assertFalse(bool(frame["onchain_depeg_flag_effective"].astype(bool).any()))
 
 
+class OnchainFailSafePipelineTests(unittest.TestCase):
+    def _build_reference_matrix(self) -> pd.DataFrame:
+        idx = pd.date_range("2024-01-01", periods=600, freq="1min", tz="UTC")
+        base = pd.Series(np.linspace(1.0, 1.02, len(idx)), index=idx)
+        return pd.DataFrame(
+            {
+                "BTCUSDC-PERP": 50000.0 * base,
+                "BTCUSDT-PERP": 50000.0 * (base + 1e-6),
+                "ETHUSDC-PERP": 2500.0 * base,
+                "ETHUSDT-PERP": 2500.0 * (base + 1e-6),
+                "SOLUSDC-PERP": 80.0 * base,
+                "SOLUSDT-PERP": 80.0 * (base + 1e-6),
+                "BNBUSDC-PERP": 400.0 * base,
+                "BNBUSDT-PERP": 400.0 * (base + 1e-6),
+            },
+            index=idx,
+        )
+
+    def test_pipeline_fail_closes_when_onchain_validation_errors(self) -> None:
+        matrix = self._build_reference_matrix()
+        run_cfg = load_config("configs/config.yaml")
+        run_cfg.setdefault("onchain", {})
+        run_cfg["onchain"]["enabled"] = True
+        run_cfg["onchain"]["fail_closed_on_error"] = True
+
+        with patch("src.pipeline.build_onchain_validation_frame", side_effect=RuntimeError("provider down")):
+            signal = run_pipeline(run_cfg, matrix)["signal_frame"]
+
+        self.assertTrue(bool(signal["onchain_guardrail_fail_closed"].astype(bool).all()))
+        self.assertTrue(bool(signal["onchain_depeg_flag_effective"].astype(bool).all()))
+        self.assertTrue(bool(signal["depeg_flag"].astype(bool).all()))
+        self.assertTrue(bool(signal["decision"].astype(str).eq("Risk-off").all()))
+
+    def test_pipeline_can_opt_out_of_fail_closed_on_onchain_errors(self) -> None:
+        matrix = self._build_reference_matrix()
+        run_cfg = load_config("configs/config.yaml")
+        run_cfg.setdefault("onchain", {})
+        run_cfg["onchain"]["enabled"] = True
+        run_cfg["onchain"]["fail_closed_on_error"] = False
+
+        with patch("src.pipeline.build_onchain_validation_frame", side_effect=RuntimeError("provider down")):
+            signal = run_pipeline(run_cfg, matrix)["signal_frame"]
+
+        self.assertFalse(bool(signal["onchain_guardrail_fail_closed"].astype(bool).any()))
+        self.assertFalse(bool(signal["onchain_depeg_flag_effective"].astype(bool).any()))
+
+
 class DepegCadenceTests(unittest.TestCase):
     def test_depeg_min_consecutive_is_interpreted_in_minutes(self) -> None:
         idx = pd.date_range("2024-01-01", periods=310, freq="1s", tz="UTC")
@@ -939,6 +994,19 @@ class DepegCadenceTests(unittest.TestCase):
         self.assertFalse(bool(flag.iloc[298]))
         self.assertTrue(bool(flag.iloc[299]))
         self.assertFalse(bool(flag.iloc[300]))
+
+
+class DuplicateColumnSafetyTests(unittest.TestCase):
+    def test_prepare_frame_for_parquet_raises_on_duplicate_columns(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=2, freq="1min", tz="UTC")
+        frame = pd.DataFrame(
+            np.array([[1.0, 2.0], [3.0, 4.0]]),
+            index=idx,
+            columns=["dup", "dup"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "Duplicate column names found"):
+            _prepare_frame_for_parquet(frame, context="unit_test.parquet")
 
 
 class GlitchFilterTests(unittest.TestCase):

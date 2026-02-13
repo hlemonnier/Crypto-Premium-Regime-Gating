@@ -13,6 +13,7 @@ import requests
 @dataclass(frozen=True)
 class OnchainConfig:
     enabled: bool = True
+    fail_closed_on_error: bool = True
     provider: str = "defillama"
     stablecoin_prices_url: str = "https://stablecoins.llama.fi/stablecoinprices"
     usdc_key: str = "usd-coin"
@@ -43,10 +44,12 @@ ONCHAIN_COLUMNS = [
     "onchain_data_stale",
     "onchain_divergence_flag",
     "onchain_data_available",
+    "onchain_guardrail_fail_closed",
 ]
 
 
-def empty_onchain_frame(index: pd.Index) -> pd.DataFrame:
+def empty_onchain_frame(index: pd.Index, *, fail_closed: bool = False) -> pd.DataFrame:
+    fail_closed_flag = bool(fail_closed)
     frame = pd.DataFrame(index=index)
     frame["onchain_usdc_price"] = np.nan
     frame["onchain_usdt_price"] = np.nan
@@ -58,11 +61,12 @@ def empty_onchain_frame(index: pd.Index) -> pd.DataFrame:
     frame["onchain_log_usdt_dev"] = np.nan
     frame["onchain_proxy"] = np.nan
     frame["onchain_divergence"] = np.nan
-    frame["onchain_depeg_flag"] = False
-    frame["onchain_depeg_flag_effective"] = False
+    frame["onchain_depeg_flag"] = fail_closed_flag
+    frame["onchain_depeg_flag_effective"] = fail_closed_flag
     frame["onchain_data_stale"] = True
     frame["onchain_divergence_flag"] = False
     frame["onchain_data_available"] = False
+    frame["onchain_guardrail_fail_closed"] = fail_closed_flag
     return frame
 
 

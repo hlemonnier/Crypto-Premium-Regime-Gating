@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
+import warnings
 
 import pandas as pd
 
@@ -55,6 +56,7 @@ def _compute_core_frames(config: dict[str, Any], matrix: pd.DataFrame) -> dict[s
     )
 
     onchain_cfg = _build_dataclass(OnchainConfig, config.get("onchain"))
+    onchain_fail_closed_on_error = bool(getattr(onchain_cfg, "fail_closed_on_error", True))
     if onchain_cfg.enabled:
         try:
             onchain_frame = build_onchain_validation_frame(
@@ -62,8 +64,21 @@ def _compute_core_frames(config: dict[str, Any], matrix: pd.DataFrame) -> dict[s
                 stablecoin_proxy=premium_frame["stablecoin_proxy"],
                 cfg=onchain_cfg,
             )
-        except Exception:
-            onchain_frame = empty_onchain_frame(premium_frame.index)
+        except Exception as exc:
+            if onchain_fail_closed_on_error:
+                warnings.warn(
+                    "On-chain validation failed in ablation run; fail-closed guardrail engaged "
+                    f"(forcing Risk-off until recovery): {exc}"
+                )
+            else:
+                warnings.warn(
+                    "On-chain validation failed in ablation run; continuing fail-open without "
+                    f"on-chain guardrail: {exc}"
+                )
+            onchain_frame = empty_onchain_frame(
+                premium_frame.index,
+                fail_closed=onchain_fail_closed_on_error,
+            )
     else:
         onchain_frame = empty_onchain_frame(premium_frame.index)
     market_depeg_flag = premium_frame["depeg_flag"].fillna(False).astype(bool).rename("market_depeg_flag")

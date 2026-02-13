@@ -120,16 +120,20 @@ def _next_unique_name(base: str, taken: set[object]) -> str:
     return candidate
 
 
+def _assert_no_duplicate_columns(frame: pd.DataFrame, *, context: str) -> None:
+    duplicated_cols = frame.columns[frame.columns.duplicated(keep=False)]
+    if len(duplicated_cols) == 0:
+        return
+    duplicates = sorted({str(col) for col in duplicated_cols.tolist()})
+    raise ValueError(
+        f"Duplicate column names found in {context}: {duplicates}. "
+        "Refusing to apply drop-first semantics."
+    )
+
+
 def _prepare_frame_for_parquet(frame: pd.DataFrame, *, context: str) -> pd.DataFrame:
     out = frame.copy()
-    duplicated_cols = out.columns[out.columns.duplicated(keep="first")]
-    if len(duplicated_cols) > 0:
-        duplicates = sorted({str(col) for col in duplicated_cols.tolist()})
-        warnings.warn(
-            f"Dropping duplicate column names before parquet export for {context}: {duplicates}",
-            stacklevel=2,
-        )
-        out = out.loc[:, ~out.columns.duplicated(keep="first")]
+    _assert_no_duplicate_columns(out, context=f"{context} (parquet export)")
 
     if isinstance(out.index, pd.MultiIndex):
         names: list[object | None] = list(out.index.names)
@@ -260,6 +264,7 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     )
 
     onchain_cfg = _build_dataclass(OnchainConfig, config.get("onchain"))
+    onchain_fail_closed_on_error = bool(getattr(onchain_cfg, "fail_closed_on_error", True))
     if onchain_cfg.enabled:
         try:
             onchain_frame = build_onchain_validation_frame(
@@ -268,8 +273,20 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
                 cfg=onchain_cfg,
             )
         except Exception as exc:
-            warnings.warn(f"On-chain validation failed, continuing without it: {exc}")
-            onchain_frame = empty_onchain_frame(premium_frame.index)
+            if onchain_fail_closed_on_error:
+                warnings.warn(
+                    "On-chain validation failed, fail-closed guardrail engaged "
+                    f"(forcing Risk-off until recovery): {exc}"
+                )
+            else:
+                warnings.warn(
+                    "On-chain validation failed, continuing fail-open without on-chain guardrail: "
+                    f"{exc}"
+                )
+            onchain_frame = empty_onchain_frame(
+                premium_frame.index,
+                fail_closed=onchain_fail_closed_on_error,
+            )
     else:
         onchain_frame = empty_onchain_frame(premium_frame.index)
 
@@ -320,6 +337,8 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
     hawkes_diag_frame["hawkes_quality_pass"] = bool(hawkes_quality_pass)
     hawkes_diag_frame["hawkes_quality_reason"] = str(hawkes_quality_reason)
     for key, value in hawkes_quality_metrics.items():
+        if key in hawkes_frame.columns:
+            continue
         hawkes_diag_frame[key] = float(value)
 
     strategy_cfg = _build_dataclass(StrategyConfig, config.get("strategy"))
@@ -353,7 +372,7 @@ def run_pipeline(config: dict[str, Any], price_matrix: pd.DataFrame) -> dict[str
         ],
         axis=1,
     )
-    signal_frame = signal_frame.loc[:, ~signal_frame.columns.duplicated(keep="first")]
+    _assert_no_duplicate_columns(signal_frame, context="run_pipeline.signal_frame")
     signal_frame = signal_frame.loc[~signal_frame.index.duplicated(keep="last")]
     signal_frame = signal_frame.sort_index()
 
