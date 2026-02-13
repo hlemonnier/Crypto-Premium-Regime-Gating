@@ -14,12 +14,17 @@ python -m src.pipeline --config configs/config.yaml
 
 Default runnable input already configured in `configs/config.yaml`:
 
-- `data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv`
+- `data/processed/episodes/bybit_usdc_depeg_2023/prices_matrix.csv`
 
 Main outputs after pipeline run:
 
 - `reports/tables/`
 - `reports/figures/`
+
+Quick safety check after running:
+
+- `reports/tables/safety_diagnostics.csv` should show `depeg_bars > 0`, `riskoff_bars > 0`, and `depeg_without_riskoff_bars = 0` on the default bundled depeg episode.
+- `reports/tables/scope_audit.csv` provides machine-auditable pass/fail checks mapped to requested baseline scope.
 
 ## Repository map
 
@@ -150,6 +155,7 @@ Pipeline output files (default):
 - `reports/tables/signal_frame.parquet` (fallback: `reports/tables/signal_frame.csv`)
 - `reports/tables/stablecoin_proxy_components.parquet` (fallback: `reports/tables/stablecoin_proxy_components.csv`)
 - `reports/tables/safety_diagnostics.csv`
+- `reports/tables/scope_audit.csv`
 - `reports/tables/edge_net_size_curve.csv`
 - `reports/tables/break_even_premium_curve.csv`
 - `reports/tables/edge_net_summary.csv`

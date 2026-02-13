@@ -197,6 +197,118 @@ def _build_unifier_artifacts(signal_frame: pd.DataFrame) -> dict[str, pd.DataFra
     }
 
 
+def _build_scope_audit(
+    *,
+    signal_frame: pd.DataFrame,
+    signal_path: Path,
+    metrics_path: Path,
+    safety_diag_path: Path,
+    figure_1_path: Path,
+    figure_2_path: Path,
+    figure_3_path: Path,
+    depeg_bars: int,
+    riskoff_bars: int,
+    depeg_without_riskoff_bars: int,
+) -> pd.DataFrame:
+    scope_ref = "original_email_request_baseline"
+    required_decisions = {"Trade", "Widen", "Risk-off"}
+    decision_series = signal_frame.get("decision", pd.Series("", index=signal_frame.index)).astype(str)
+    observed_decisions = {value for value in decision_series.unique() if value}
+
+    rows = [
+        {
+            "scope_reference": scope_ref,
+            "requirement_id": "premium_debias_columns",
+            "requirement": "Debiased premium outputs exist (p_naive, stablecoin_proxy, p, depeg_flag).",
+            "status": "pass"
+            if {"p_naive", "stablecoin_proxy", "p", "depeg_flag"}.issubset(set(signal_frame.columns))
+            else "fail",
+            "evidence": "columns="
+            + str(sorted([col for col in ["p_naive", "stablecoin_proxy", "p", "depeg_flag"] if col in signal_frame.columns])),
+            "artifact_path": str(signal_path),
+        },
+        {
+            "scope_reference": scope_ref,
+            "requirement_id": "robust_filter_columns",
+            "requirement": "Robust filter outputs exist (p_smooth, sigma_hat, z_t, event).",
+            "status": "pass"
+            if {"p_smooth", "sigma_hat", "z_t", "event"}.issubset(set(signal_frame.columns))
+            else "fail",
+            "evidence": "columns="
+            + str(sorted([col for col in ["p_smooth", "sigma_hat", "z_t", "event"] if col in signal_frame.columns])),
+            "artifact_path": str(signal_path),
+        },
+        {
+            "scope_reference": scope_ref,
+            "requirement_id": "state_variables_columns",
+            "requirement": "State variables exist (H_t, T_t, chi_t) with regime labels.",
+            "status": "pass"
+            if {"H_t", "T_t", "chi_t", "regime"}.issubset(set(signal_frame.columns))
+            else "fail",
+            "evidence": "columns="
+            + str(sorted([col for col in ["H_t", "T_t", "chi_t", "regime"] if col in signal_frame.columns])),
+            "artifact_path": str(signal_path),
+        },
+        {
+            "scope_reference": scope_ref,
+            "requirement_id": "decision_outputs",
+            "requirement": "Decision output is present and only uses Trade/Widen/Risk-off states.",
+            "status": "pass"
+            if observed_decisions.issubset(required_decisions) and len(observed_decisions) > 0
+            else "fail",
+            "evidence": f"observed_decisions={sorted(observed_decisions)}",
+            "artifact_path": str(signal_path),
+        },
+        {
+            "scope_reference": scope_ref,
+            "requirement_id": "stablecoin_depeg_safety",
+            "requirement": "Depeg windows are demonstrated and always Risk-off on flagged bars.",
+            "status": "pass"
+            if (depeg_bars > 0 and riskoff_bars > 0 and depeg_without_riskoff_bars == 0)
+            else "fail",
+            "evidence": (
+                f"depeg_bars={depeg_bars};"
+                f"riskoff_bars={riskoff_bars};"
+                f"depeg_without_riskoff_bars={depeg_without_riskoff_bars}"
+            ),
+            "artifact_path": str(safety_diag_path),
+        },
+        {
+            "scope_reference": scope_ref,
+            "requirement_id": "required_exports",
+            "requirement": "Core deliverables exported (metrics.csv + figure_1/2/3).",
+            "status": "pass"
+            if (
+                metrics_path.exists()
+                and figure_1_path.exists()
+                and figure_2_path.exists()
+                and figure_3_path.exists()
+                and safety_diag_path.exists()
+            )
+            else "fail",
+            "evidence": (
+                f"metrics_exists={metrics_path.exists()};"
+                f"figure_1_exists={figure_1_path.exists()};"
+                f"figure_2_exists={figure_2_path.exists()};"
+                f"figure_3_exists={figure_3_path.exists()};"
+                f"safety_diag_exists={safety_diag_path.exists()}"
+            ),
+            "artifact_path": ";".join(
+                [
+                    str(metrics_path),
+                    str(figure_1_path),
+                    str(figure_2_path),
+                    str(figure_3_path),
+                    str(safety_diag_path),
+                ]
+            ),
+        },
+    ]
+    out = pd.DataFrame(rows)
+    out["pass"] = out["status"].eq("pass")
+    return out
+
+
 def _parse_positive_timedelta(value: str, *, field_name: str) -> pd.Timedelta:
     try:
         td = pd.to_timedelta(value)
@@ -609,6 +721,7 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
     signal_path = tables_dir / "signal_frame.parquet"
     proxy_path = tables_dir / "stablecoin_proxy_components.parquet"
     safety_diag_path = tables_dir / "safety_diagnostics.csv"
+    scope_audit_path = tables_dir / "scope_audit.csv"
     edge_net_curve_path = tables_dir / "edge_net_size_curve.csv"
     break_even_curve_path = tables_dir / "break_even_premium_curve.csv"
     edge_net_summary_path = tables_dir / "edge_net_summary.csv"
@@ -697,6 +810,19 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
         figures_dir / "figure_4_edge_net.png",
         plot_cfg,
     )
+    scope_audit = _build_scope_audit(
+        signal_frame=signal_frame,
+        signal_path=signal_path,
+        metrics_path=metrics_path,
+        safety_diag_path=safety_diag_path,
+        figure_1_path=fig1,
+        figure_2_path=fig2,
+        figure_3_path=fig3,
+        depeg_bars=int(depeg_flag.sum()),
+        riskoff_bars=int(riskoff_flag.sum()),
+        depeg_without_riskoff_bars=int((depeg_flag & ~riskoff_flag).sum()),
+    )
+    scope_audit.to_csv(scope_audit_path, index=False)
 
     return {
         "metrics": metrics_path,
@@ -705,6 +831,7 @@ def export_outputs(results: dict[str, Any], config: dict[str, Any]) -> dict[str,
         "signal_frame": signal_path,
         "proxy_components": proxy_path,
         "safety_diagnostics": safety_diag_path,
+        "scope_audit": scope_audit_path,
         "edge_net_size_curve": edge_net_curve_path,
         "break_even_premium_curve": break_even_curve_path,
         "edge_net_summary": edge_net_summary_path,

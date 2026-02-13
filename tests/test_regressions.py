@@ -1305,6 +1305,7 @@ class ExportDiagnosticsTests(unittest.TestCase):
             export_outputs(results, run_cfg)
 
             safety_diag = pd.read_csv(tables_dir / "safety_diagnostics.csv")
+            scope_audit = pd.read_csv(tables_dir / "scope_audit.csv")
             self.assertIn("configured_resample_rule", safety_diag.columns)
             self.assertIn("expected_index_delta", safety_diag.columns)
             self.assertIn("observed_index_delta", safety_diag.columns)
@@ -1319,6 +1320,10 @@ class ExportDiagnosticsTests(unittest.TestCase):
             self.assertEqual(int(safety_diag.loc[0, "trade_but_trade_signal_false"]), 0)
             self.assertEqual(int(safety_diag.loc[0, "trade_with_entry_threshold_nan"]), 0)
             self.assertEqual(int(safety_diag.loc[0, "trade_with_T_t_nan"]), 0)
+            self.assertIn("requirement_id", scope_audit.columns)
+            self.assertIn("status", scope_audit.columns)
+            self.assertIn("pass", scope_audit.columns)
+            self.assertIn("stablecoin_depeg_safety", scope_audit["requirement_id"].astype(str).tolist())
 
     def test_export_outputs_writes_unifier_artifacts_and_figure4(self) -> None:
         idx = pd.date_range("2024-01-01", periods=260, freq="1min", tz="UTC", name="timestamp_utc")
@@ -1355,6 +1360,7 @@ class ExportDiagnosticsTests(unittest.TestCase):
             self.assertTrue(Path(exported["break_even_premium_curve"]).exists())
             self.assertTrue(Path(exported["edge_net_summary"]).exists())
             self.assertTrue(Path(exported["figure_4"]).exists())
+            self.assertTrue(Path(exported["scope_audit"]).exists())
 
 
 class DataIngestTimestampTests(unittest.TestCase):
@@ -1635,6 +1641,21 @@ class StablecoinSpikeSanitizerTests(unittest.TestCase):
 
 
 class EpisodeSafetyRegressionTests(unittest.TestCase):
+    def test_default_config_price_matrix_demonstrates_depeg_safety(self) -> None:
+        run_cfg = load_config("configs/config.yaml")
+        matrix_path = Path(str(run_cfg.get("data", {}).get("price_matrix_path", "")))
+        if not matrix_path.exists():
+            self.skipTest(f"Missing default bundled matrix: {matrix_path}")
+
+        matrix = load_price_matrix(matrix_path, expected_freq=str(run_cfg.get("data", {}).get("resample_rule", "1min")))
+        signal = run_pipeline(run_cfg, matrix)["signal_frame"]
+        depeg = signal["depeg_flag"].astype(bool)
+        riskoff = signal["decision"].astype(str).eq("Risk-off")
+
+        self.assertGreater(int(depeg.sum()), 0)
+        self.assertGreater(int(riskoff.sum()), 0)
+        self.assertEqual(int((depeg & ~riskoff).sum()), 0)
+
     def test_depeg_bars_are_always_riskoff_in_march_2023_episodes(self) -> None:
         config = load_config("configs/config.yaml")
         episodes = [
