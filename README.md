@@ -500,8 +500,11 @@ Backtest execution policy (default):
 - `position_mode: stateful` (multi-bar holding)
 - enter on `Trade` with side from `sign(m_t)`
 - apply confidence-based size (`position_size`) to convert sign position into effective position
-- hold at least `min_holding_bars` after entry, then exit on `Widen`
+- hold at least `min_holding_bars` after entry; `Widen` is not a flat order by default
+- exit on `Widen` only when `backtest.exit_on_widen: true` (legacy-compatible opt-in)
 - exit immediately on `Risk-off` or mean-reversion (`m_t` crossing 0 versus held side)
+- in `stateful` mode, the effective `position_size` is persistent while a position is open:
+  positive new size updates exposure; missing/zero size keeps the last active size until exit/flip
 - turnover/costs include entries, exits, and flips (`|Δposition|`)
 - PnL convention: `gross_pnl[t] = position[t-1] * (-(premium[t]-premium[t-1]))` on log-premium.
   This corresponds to mean-reversion on the premium spread (`short premium` profits when premium narrows).

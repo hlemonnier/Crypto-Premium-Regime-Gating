@@ -373,6 +373,115 @@ class StatefulExitTests(unittest.TestCase):
         self.assertEqual(float(log.loc[idx[5], "position"]), 0.0)
         self.assertEqual(int((log["position_event"] == "Exit").sum()), 2)
 
+    def test_stateful_does_not_exit_on_widen_by_default(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=5, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 0.1, 0.2, 0.3, 0.4], index=idx, name="premium")
+        decision = pd.Series(["Trade", "Widen", "Widen", "Widen", "Widen"], index=idx, name="decision")
+        m_t = pd.Series([1.0, 1.0, 1.0, 1.0, 1.0], index=idx, name="m_t")
+
+        log, _ = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_mode="stateful",
+            exit_on_widen=False,
+            exit_on_mean_reversion=False,
+            min_holding_bars=3,
+        )
+
+        self.assertEqual(int((log["position_event"] == "Exit").sum()), 0)
+        self.assertTrue(bool((log["position_sign"] != 0.0).all()))
+        self.assertTrue(bool((log["position"] != 0.0).all()))
+
+    def test_stateful_exit_on_widen_remains_available_for_legacy_mode(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=5, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 0.1, 0.2, 0.3, 0.4], index=idx, name="premium")
+        decision = pd.Series(["Trade", "Widen", "Widen", "Widen", "Widen"], index=idx, name="decision")
+        m_t = pd.Series([1.0, 1.0, 1.0, 1.0, 1.0], index=idx, name="m_t")
+
+        log, _ = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_mode="stateful",
+            exit_on_widen=True,
+            exit_on_mean_reversion=False,
+            min_holding_bars=3,
+        )
+
+        self.assertEqual(int((log["position_event"] == "Exit").sum()), 1)
+        self.assertEqual(str(log.loc[idx[3], "position_event"]), "Exit")
+        self.assertEqual(float(log.loc[idx[3], "position"]), 0.0)
+
+    def test_stateful_position_size_persists_across_widen_and_updates_on_positive_signal(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=5, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 0.1, 0.2, 0.3, 0.4], index=idx, name="premium")
+        decision = pd.Series(["Trade", "Widen", "Widen", "Widen", "Widen"], index=idx, name="decision")
+        m_t = pd.Series([1.0, 1.0, 1.0, 1.0, 1.0], index=idx, name="m_t")
+        size_signal = pd.Series([0.4, 0.0, 0.8, np.nan, 0.0], index=idx, name="position_size")
+
+        log, _ = run_backtest(
+            premium,
+            decision,
+            m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_size=size_signal,
+            position_mode="stateful",
+            exit_on_widen=False,
+            exit_on_mean_reversion=False,
+            min_holding_bars=3,
+        )
+
+        expected_size = pd.Series([0.4, 0.4, 0.8, 0.8, 0.8], index=idx)
+        np.testing.assert_allclose(
+            log["position_size"].to_numpy(dtype=float),
+            expected_size.to_numpy(dtype=float),
+        )
+        invalid = (log["position_sign"] != 0.0) & (log["position_size"] == 0.0)
+        self.assertEqual(int(invalid.sum()), 0)
+
+    def test_stateful_riskoff_and_mean_reversion_exits_are_unchanged(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=4, freq="1min", tz="UTC")
+        premium = pd.Series([0.0, 0.1, 0.0, -0.1], index=idx, name="premium")
+
+        riskoff_decision = pd.Series(["Trade", "Risk-off", "Widen", "Widen"], index=idx, name="decision")
+        riskoff_m_t = pd.Series([1.0, 1.0, 1.0, 1.0], index=idx, name="m_t")
+        riskoff_log, _ = run_backtest(
+            premium,
+            riskoff_decision,
+            riskoff_m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_mode="stateful",
+            exit_on_widen=False,
+            exit_on_mean_reversion=False,
+            min_holding_bars=1,
+        )
+        self.assertEqual(str(riskoff_log.loc[idx[1], "position_event"]), "Exit")
+        self.assertEqual(float(riskoff_log.loc[idx[1], "position"]), 0.0)
+
+        meanrev_decision = pd.Series(["Trade", "Widen", "Widen", "Widen"], index=idx, name="decision")
+        meanrev_m_t = pd.Series([1.0, 1.0, -0.1, -0.1], index=idx, name="m_t")
+        meanrev_log, _ = run_backtest(
+            premium,
+            meanrev_decision,
+            meanrev_m_t,
+            freq="1min",
+            cost_bps=0.0,
+            position_mode="stateful",
+            exit_on_widen=False,
+            exit_on_mean_reversion=True,
+            min_holding_bars=1,
+        )
+        self.assertEqual(int((meanrev_log["position_event"] == "Exit").sum()), 1)
+        self.assertEqual(str(meanrev_log.loc[idx[2], "position_event"]), "Exit")
+        self.assertEqual(float(meanrev_log.loc[idx[2], "position"]), 0.0)
+
 
 class HawkesAdaptiveThresholdTests(unittest.TestCase):
     def test_adaptive_hawkes_thresholds_generate_causal_signals(self) -> None:

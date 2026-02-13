@@ -12,7 +12,7 @@ class BacktestConfig:
     cost_bps: float = 1.0
     naive_threshold: float = 0.001
     position_mode: str = "stateful"
-    exit_on_widen: bool = True
+    exit_on_widen: bool = False
     exit_on_mean_reversion: bool = True
     min_holding_bars: int = 5
     max_holding_bars: int | None = None
@@ -143,12 +143,51 @@ def _decision_to_position_stateful(
     )
 
 
+def _effective_stateful_size(
+    pos_sign: pd.Series,
+    size_signal: pd.Series,
+    *,
+    fallback_size: float = 1.0,
+) -> pd.Series:
+    fallback = float(np.clip(float(fallback_size), 0.0, 1.0))
+    sign_values = pd.to_numeric(pos_sign, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    signal_values = pd.to_numeric(size_signal, errors="coerce").clip(lower=0.0, upper=1.0).to_numpy(dtype=float)
+    effective = np.zeros(len(sign_values), dtype=float)
+
+    prev_sign = 0.0
+    current_size = 0.0
+    for i, (sign_i, signal_i) in enumerate(zip(sign_values, signal_values)):
+        sign_i = float(sign_i)
+        entered_or_flipped = (prev_sign == 0.0 and sign_i != 0.0) or (
+            prev_sign != 0.0 and sign_i != 0.0 and np.sign(prev_sign) != np.sign(sign_i)
+        )
+
+        has_positive_signal = np.isfinite(signal_i) and signal_i > 0.0
+        if sign_i == 0.0:
+            current_size = 0.0
+        elif entered_or_flipped:
+            if has_positive_signal:
+                current_size = float(signal_i)
+            elif current_size <= 0.0:
+                current_size = fallback
+        else:
+            if has_positive_signal:
+                current_size = float(signal_i)
+            elif current_size <= 0.0:
+                current_size = fallback
+
+        effective[i] = current_size if sign_i != 0.0 else 0.0
+        prev_sign = sign_i
+
+    return pd.Series(effective, index=pos_sign.index, name="position_size")
+
+
 def decision_to_position(
     decision: pd.Series,
     m_t: pd.Series,
     *,
     mode: str = "stateful",
-    exit_on_widen: bool = True,
+    exit_on_widen: bool = False,
     exit_on_mean_reversion: bool = True,
     min_holding_bars: int = 5,
     max_holding_bars: int | None = None,
@@ -177,16 +216,17 @@ def run_backtest(
     cost_bps: float,
     position_size: pd.Series | None = None,
     position_mode: str = "stateful",
-    exit_on_widen: bool = True,
+    exit_on_widen: bool = False,
     exit_on_mean_reversion: bool = True,
     min_holding_bars: int = 5,
     max_holding_bars: int | None = None,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     p = premium.astype(float).copy()
+    mode = str(position_mode).strip().lower()
     position_frame = decision_to_position(
         decision,
         m_t,
-        mode=position_mode,
+        mode=mode,
         exit_on_widen=exit_on_widen,
         exit_on_mean_reversion=exit_on_mean_reversion,
         min_holding_bars=min_holding_bars,
@@ -197,8 +237,11 @@ def run_backtest(
         size = pd.Series(1.0, index=pos_sign.index, dtype="float64")
     else:
         size = pd.to_numeric(position_size.reindex(pos_sign.index), errors="coerce")
-        size = size.fillna(0.0).clip(lower=0.0, upper=1.0)
-    size = size.where(pos_sign.ne(0.0), 0.0).rename("position_size")
+        size = size.clip(lower=0.0, upper=1.0)
+    if mode == "stateful":
+        size = _effective_stateful_size(pos_sign, size).rename("position_size")
+    else:
+        size = size.fillna(0.0).where(pos_sign.ne(0.0), 0.0).rename("position_size")
     pos = (pos_sign * size).rename("position")
     position_frame = position_frame.drop(columns=["position"]).copy()
     position_frame.insert(0, "position_sign", pos_sign)

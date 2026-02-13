@@ -115,7 +115,7 @@ backtest:
   cost_bps: 1.0
   naive_threshold: 0.001
   position_mode: stateful
-  exit_on_widen: true
+  exit_on_widen: false
   exit_on_mean_reversion: true
   min_holding_bars: 5
   max_holding_bars:
