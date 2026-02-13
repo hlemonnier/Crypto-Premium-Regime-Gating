@@ -1,13 +1,11 @@
 # Crypto Premium Regime Gating (Hiring Project)
 
-This repository implements the v5 framework described in `AGENTS.md` and the two notes:
+This repository implements the v5 framework described in `AGENTS.md`, with:
 
 - `Notice.pdf` (baseline: premium + stat-mech + regime gating)
-- `Notice + Hawkes.pdf` (optional Hawkes contagion overlay)
+- `Notice + Hawkes.pdf` (optional Hawkes overlay)
 
-## Recruiter quickstart (5 minutes)
-
-From a fresh clone, these are the only commands needed to verify the project runs:
+## Quickstart (what the reviewer needs)
 
 ```bash
 python3 -m venv .venv
@@ -17,559 +15,128 @@ python -m unittest discover -s tests -p 'test_*.py' -q
 python -m src.pipeline --config configs/config.yaml
 ```
 
-What this produces:
-
-- core tables: `reports/tables/`
-- core figures: `reports/figures/`
-- final polished package: `reports/final/`
-
-The default config (`configs/config.yaml`) already points to a bundled sample matrix:
+Default runnable input already configured in `configs/config.yaml`:
 
 - `data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv`
 
-## Scope selected from the hiring brief
+Main outputs after pipeline run:
 
-This project combines:
+- `reports/tables/`
+- `reports/figures/`
 
-- Stable coin analysis:
-  - empirical proxy of `USDT/USDC` spread via cross-asset replication
-  - depeg detection flag (`delta_log`, consecutive minutes converted to bars from `data.resample_rule`)
-  - dedicated on-chain validation feed (`onchain_proxy` from DefiLlama)
-  - transmission into synthetic premium (`BTCUSDC` vs `BTCUSDT`)
-- Premium analysis (robust estimation):
-  - naive premium failure handling
-  - robust smoothing + outlier events
-  - regime detection (transient vs stress)
-- Statistical mechanics features:
-  - entropy `H_t`, temperature `T_t`, susceptibility `chi_t`
-- Optional advanced method:
-  - Hawkes branching ratio `n(t)` for stress contagion gating
+## Repository map
 
-## Data sources from the email
+Top-level:
 
-- Binance: [data.binance.vision](https://data.binance.vision/?prefix=data/)
-- GateIO historical quotes: [gate.com developer docs](https://www.gate.com/developer/historical_quotes)
-- Bybit historical data: [bybit history data](https://www.bybit.com/derivatives/en/history-data)
-- OKX direct URLs (login bypass pattern):
-  - trades: `https://www.okx.com/cdn/okex/traderecords/trades/monthly/YYYYMM/allfuture-trades-YYYY-MM-DD.zip`
-  - funding: `https://www.okx.com/cdn/okex/traderecords/swaprate/monthly/YYYYMM/allswaprate-swaprate-YYYY-MM-DD.zip`
+- `README.md`: runbook
+- `AGENTS.md`: v5 project spec
+- `AGENT.md`: coding guide used during implementation
+- `Notice.pdf`, `Notice + Hawkes.pdf`: reference notes
+- `requirements.txt`: pinned dependencies
+- `configs/config.yaml`: default runtime config
+- `src/`: implementation
+- `tests/`: test suite
+- `scripts/`: utility scripts
+- `notebooks/01_report.ipynb`: notebook surface
+- `data/`: local raw/processed inputs
+- `reports/`: generated outputs
 
-Helpers for OKX URL construction/download are implemented in `src/data_ingest.py`.
+Runtime folders:
 
-Quick example:
+- `data/raw/`: downloaded raw exchange files
+- `data/processed/episodes/<episode>/`: episode matrices (`prices_matrix.*`)
+- `data/processed/onchain/`: on-chain cache
+- `data/processed/orderbook/<episode>/`: execution/L2 datasets
+- `reports/tables/`: latest pipeline tables
+- `reports/figures/`: latest pipeline figures
+- `reports/final/`: final consolidated deliverables
+- `reports/episodes/<episode>/`: per-episode outputs from loader CLIs
 
-```python
-from datetime import date
-from src.data_ingest import download_okx_range
+### Source files (`src/`)
 
-download_okx_range(
-    start=date(2024, 8, 5),
-    end=date(2024, 8, 6),
-    kind="trades",
-    output_dir="data/raw/okx/trades",
-)
-```
+- `src/__init__.py`: package marker
+- `src/pipeline.py`: end-to-end orchestrator
+- `src/data_ingest.py`: raw normalization/resampling/UTC alignment
+- `src/premium.py`: `p_naive`, proxy, debiased premium `p`, depeg market flag
+- `src/robust_filter.py`: robust smoothing/scale and event detection
+- `src/statmech.py`: `H_t`, `T_t`, `chi_t`
+- `src/regimes.py`: transient/stress regime frame
+- `src/thresholds.py`: causal quantile threshold utilities
+- `src/hawkes.py`: optional rolling Hawkes + branching ratio quality checks
+- `src/strategy.py`: `Trade` / `Widen` / `Risk-off` decisions + sizing
+- `src/backtest.py`: naive vs gated backtest + metrics
+- `src/plots.py`: figures export
+- `src/binance_data.py`: Binance downloader + episode builder
+- `src/bybit_data.py`: Bybit downloader + episode builder
+- `src/okx_data.py`: OKX downloader + episode builder
+- `src/onchain.py`: DefiLlama validation feed integration
+- `src/execution_data.py`: execution/L2 dataset bootstrap
+- `src/execution_quality.py`: slippage/resilience diagnostics
+- `src/ablation_core.py`: shared core utilities for ablations
+- `src/ablation_report.py`: ablation report CLI
+- `src/robustness_report.py`: walk-forward OOS robustness CLI
+- `src/tune_gating.py`: gating parameter tuning CLI
+- `src/calibration_report.py`: tuned vs baseline calibration report CLI
+- `src/presentation_pack.py`: final consolidated report pack CLI
 
-## Repository map (complete)
+### Tests and scripts
 
-Top-level folders/files:
+- `tests/test_regressions.py`: component + integration regressions
+- `tests/test_robustness_report.py`: robustness report tests
+- `scripts/package_submission.sh`: create clean recruiter zip
+- `scripts/clean_local_artifacts.sh`: remove local temporary artifacts
 
-- `.github/workflows/tests.yml`: CI workflow running unit/regression tests
-- `.gitignore`: ignore rules for local/runtime artifacts
-- `AGENT.md`: project coding guide used during implementation
-- `AGENTS.md`: v5 specification and acceptance criteria
-- `Notice.pdf`: baseline note from the brief
-- `Notice + Hawkes.pdf`: Hawkes extension note from the brief
-- `README.md`: runbook and project documentation
-- `requirements.txt`: pinned Python dependencies
-- `configs/config.yaml`: default runtime configuration
-- `src/`: full implementation modules
-- `tests/`: automated regression tests
-- `scripts/`: packaging and cleanup helpers
-- `notebooks/01_report.ipynb`: notebook report surface
-- `data/`: raw + processed data folders (local runtime inputs/cache)
-- `reports/`: generated outputs (tables/figures/final package + historical reruns)
+## Command index (essential)
 
-Common runtime subfolders:
-
-- `data/raw/`: downloaded raw exchange files (CSV/ZIP inputs before normalization)
-- `data/processed/episodes/<episode>/`: episode-ready matrices (`prices_matrix.*`)
-- `data/processed/onchain/`: cached DefiLlama on-chain feed snapshots
-- `data/processed/orderbook/<episode>/`: execution/L2 datasets used by execution diagnostics
-- `reports/tables/`: default pipeline tables for the latest run
-- `reports/figures/`: default pipeline figures for the latest run
-- `reports/final/`: consolidated final deliverables (calibration/execution/summary pack)
-- `reports/episodes/<episode>/`: per-episode outputs when using episode loaders with `--run-pipeline`
-
-All source files under `src/`:
-
-- `src/__init__.py`: package marker and module-level description
-- `src/data_ingest.py`: raw file normalization, UTC alignment, resampling, glitch filters
-- `src/binance_data.py`: Binance episode downloader + matrix builder
-- `src/bybit_data.py`: Bybit episode downloader + matrix builder
-- `src/okx_data.py`: OKX archive downloader + matrix builder
-- `src/onchain.py`: DefiLlama on-chain stablecoin validation and freshness/depeg guards
-- `src/premium.py`: `p_naive`, stablecoin proxy, debiased premium `p`, depeg market flag
-- `src/robust_filter.py`: robust smoothing/scale (`p_smooth`, `sigma_hat`, `z_t`, events)
-- `src/statmech.py`: stat-mech features (`H_t`, `T_t`, `chi_t`)
-- `src/thresholds.py`: causal threshold utilities (`fixed`/`expanding`/`rolling` quantiles)
-- `src/regimes.py`: transient/stress regime construction
-- `src/hawkes.py`: optional rolling Hawkes fit and branching ratio quality gates
-- `src/strategy.py`: final decision policy (`Trade`/`Widen`/`Risk-off`) and sizing
-- `src/backtest.py`: naive vs gated backtest engines + metric exports
-- `src/ablation_core.py`: shared core builders for factorial ablations
-- `src/ablation_report.py`: single-command ablation ladder report
-- `src/robustness_report.py`: walk-forward OOS robustness + stress-matrix report
-- `src/tune_gating.py`: parameter search with explicit OOS selection
-- `src/calibration_report.py`: tuned-vs-baseline calibration comparisons
-- `src/execution_data.py`: bootstrap public execution datasets (L2/trades where available)
-- `src/execution_quality.py`: slippage/resilience diagnostics and execution report
-- `src/plots.py`: figure builders (timeline/panel/phase-space/edge-net)
-- `src/pipeline.py`: end-to-end orchestrator for the full run
-- `src/presentation_pack.py`: consolidated final report pack for submission
-
-Tests and scripts:
-
-- `tests/test_regressions.py`: end-to-end and component-level regressions
-- `tests/test_robustness_report.py`: robustness report validation tests
-- `scripts/package_submission.sh`: builds recruiter-facing clean zip package
-- `scripts/clean_local_artifacts.sh`: removes local temporary/generated clutter
-
-## Setup
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Tests (CI-safe)
-
-```bash
-python -m unittest discover -s tests -p 'test_*.py' -q
-```
-
-## CLI command index
-
-All executable modules (validated with `--help`):
-
-- `python -m src.pipeline --config configs/config.yaml`: run full premium/regime pipeline on an existing price matrix
-- `python -m src.data_ingest --inputs ... --output-dir data/processed`: normalize raw market files into aligned processed tables
-- `python -m src.binance_data --start ... --end ... --run-pipeline`: download Binance episode data and optionally run pipeline
-- `python -m src.bybit_data --start ... --end ... --run-pipeline`: download Bybit episode data and optionally run pipeline
-- `python -m src.okx_data --start ... --end ... --run-pipeline`: download OKX archive data and optionally run pipeline
-- `python -m src.execution_data --skip-existing --include-agg-trades`: bootstrap execution datasets (orderbook/trades)
-- `python -m src.execution_quality --output-dir reports/final`: compute execution slippage/resilience diagnostics
-- `python -m src.ablation_report --output-dir reports/tables`: run ablation ladder (`naive` -> `debias` -> `robust` -> `regime` -> optional `hawkes`)
-- `python -m src.robustness_report --output-dir reports/robustness`: run walk-forward OOS robustness + stress matrix
-- `python -m src.tune_gating --episodes ... --apply`: tune gating thresholds with explicit train/OOS split
-- `python -m src.calibration_report --episodes ... --output-dir reports/final`: compare tuned config against Notice-style baseline
-- `python -m src.presentation_pack --output-dir reports/final --reports-root reports`: build final recruiter-facing pack
-
-## Expected input
-
-Main pipeline input is a price matrix (parquet recommended, csv supported):
-
-- path: `data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv` (default in `configs/config.yaml`, configurable)
-- index: `timestamp_utc` (UTC DatetimeIndex)
-- columns: symbols (e.g., `BTCUSDC-PERP`, `BTCUSDT-PERP`, `ETHUSDC-PERP`, ...)
-- values: price
-
-Loader safety behavior:
-
-- rows with invalid timestamps are dropped with warning
-- duplicate timestamps are deduplicated with `keep='last'` and warning
-- matched USDC/USDT pairs are sanitized for one-bar stale spikes by default
-  - rule: large one-leg jump + quiet counterpart leg + no cross-asset confirmation on other USDC/USDT pairs
-  - action: replace suspected stale point with previous bar value
-  - implementation is causal (no future bar lookup)
-
-Target contract handling is now auto-adaptive by default:
-
-- if configured target symbols are present, they are used directly
-- if not, pipeline auto-selects the closest available USDC/USDT pair (same root/suffix preference, e.g. `BTCUSDC-SPOT` + `BTCUSDT-SPOT`)
-- if no compatible USDC/USDT target pair exists, pipeline fails with an explicit data-contract error
-
-If you start from raw files, use functions from `src/data_ingest.py` to normalize and build this matrix.
-
-CLI option:
-
-```bash
-python -m src.data_ingest \
-  --inputs "data/raw/**/*.csv" \
-  --output-dir data/processed \
-  --resample-rule 1min
-```
-
-## Run
+Run pipeline:
 
 ```bash
 python -m src.pipeline --config configs/config.yaml
 ```
 
-The default config now points to a bundled matrix under `data/processed/episodes/yen_unwind_2024_binance/`, so this command is runnable out of the box.
-
-or override the matrix path:
+Build matrix from raw files:
 
 ```bash
-python -m src.pipeline --config configs/config.yaml --price-matrix data/processed/my_prices.parquet
+python -m src.data_ingest --inputs "data/raw/**/*.csv" --output-dir data/processed --resample-rule 1min
 ```
 
-If parquet engine is unavailable locally, ingestion/export falls back to csv and you can pass a `.csv` path.
-
-## Clean submission package
-
-To generate a recruiter-facing zip without local/editor/git artifacts:
+Episode loaders (download + optional pipeline run):
 
 ```bash
-./scripts/package_submission.sh
+python -m src.binance_data --start 2024-08-05 --end 2024-08-06 --market futures --futures-price-source mark --episode-name yen_unwind_2024_binance --run-pipeline --skip-existing
+python -m src.bybit_data --start 2023-03-10 --end 2023-03-11 --category spot --episode-name bybit_usdc_depeg_2023 --run-pipeline
+python -m src.okx_data --start 2023-03-10 --end 2023-03-11 --episode-name okx_usdc_depeg_2023 --run-pipeline --skip-existing
 ```
 
-Optional output path:
+Optional report/analysis CLIs:
 
 ```bash
-./scripts/package_submission.sh /tmp/crypto_premium_submission.zip
-```
-
-Optional cleanup helper before packaging:
-
-```bash
-./scripts/clean_local_artifacts.sh
-```
-
-## One-command episode run (Binance)
-
-Download daily Binance futures klines, build the matrix, and run the full pipeline:
-
-```bash
-python -m src.binance_data \
-  --start 2024-08-05 \
-  --end 2024-08-06 \
-  --market futures \
-  --futures-price-source mark \
-  --episode-name yen_unwind_2024_binance \
-  --run-pipeline \
-  --skip-existing
-```
-
-Price convention note:
-
-- for Binance futures, default source is now `markPriceKlines` (`--futures-price-source mark`) rather than trade `close` klines.
-- alternative sources are available (`last`, `index`, `premium`) but `mark` is the recommended default for this project.
-
-For older windows (for example March 2023), Binance public data may not contain USDC quote pairs; the CLI prints an explicit availability error in that case.
-
-This writes:
-
-- processed data: `data/processed/episodes/yen_unwind_2024_binance/`
-- per-episode reports: `reports/episodes/yen_unwind_2024_binance/`
-
-## March 2023 USDC coverage loaders (Bybit / OKX)
-
-Bybit spot (USDC pairs available in public API):
-
-```bash
-python -m src.bybit_data \
-  --start 2023-03-10 \
-  --end 2023-03-11 \
-  --category spot \
-  --episode-name bybit_usdc_depeg_2023 \
-  --run-pipeline
-```
-
-OKX futures trade archive (auto-selects matched USDC/USDT contracts by liquidity):
-
-```bash
-python -m src.okx_data \
-  --start 2023-03-10 \
-  --end 2023-03-11 \
-  --episode-name okx_usdc_depeg_2023 \
-  --run-pipeline \
-  --skip-existing
-```
-
-Example auto-selected contracts for this window:
-- `BTC-USDC-230331` vs `BTC-USDT-230331`
-- `ETH-USDC-230331` vs `ETH-USDT-230331`
-
-Both commands write episode-specific outputs under `reports/episodes/<episode_name>/`.
-
-## Gating parameter tuning (2024 episodes)
-
-Grid-search regime + strategy gating parameters with an explicit out-of-sample holdout:
-
-```bash
-python -m src.tune_gating \
-  --episodes "data/processed/episodes/*2024_binance/prices_matrix.csv" \
-  --holdout-count 2 \
-  --min-train-episodes 2 \
-  --min-oos-episodes 2 \
-  --apply
-```
-
-Default tuning split behavior:
-
-- when `--train-episodes/--test-episodes` are not provided, episodes are sorted chronologically and the last `--holdout-count` episodes are used as OOS.
-- fail-closed defaults require at least `--min-train-episodes` and `--min-oos-episodes`; tuning aborts if the split is too small.
-- output includes both `train_*` and `oos_*` metrics plus `selection_score`.
-- output also includes reproducibility metadata (`run_*`: split constraints, effective episode counts, and episode ids).
-- selection defaults to a blended score (`--oos-weight 0.5`).
-
-Current defaults in `configs/config.yaml` include:
-
-- `strategy.entry_k: 1.0`
-- `strategy.t_widen_quantile: 0.97`
-- `strategy.chi_widen_quantile: 0.99`
-- `strategy.threshold_mode: expanding` (causal quantiles)
-- `strategy.hawkes_threshold_mode: expanding` (causal Hawkes gating when enabled)
-- `hawkes.quality_min_refits: 3`
-- `hawkes.quality_min_unique_n: 5`
-- `hawkes.quality_min_n_std: 0.005`
-- `hawkes.quality_min_fit_ok_ratio: 0.2`
-- `regimes.stress_quantile: 0.95`
-- `regimes.recovery_quantile: 0.6`
-- `regimes.threshold_mode: expanding` (causal quantiles)
-- `regimes.zscore_mode: expanding` (causal robust standardization)
-- `premium.proxy_method: median` (`pw_rolling` also supported)
-- `premium.pw_window: 12h`
-- `premium.pw_min_period_fraction: 0.5`
-- `onchain.max_source_age_hours: 48`
-
-Proxy smoothness caveat:
-
-- the current implementation applies an empirical smoothness guardrail on `stablecoin_proxy` (diff-vol capped relative to target `p_naive`).
-- this is a practical noise-control heuristic, not a structural guarantee of fair value.
-- during stressed/thin-liquidity windows, it can over-smooth abrupt moves; interpret together with `depeg_flag` and on-chain diagnostics.
-
-Reference OOS tuning table:
-
-- `reports/tables/gating_tuning_oos_latest.csv`
-
-If you need to reproduce legacy static-threshold behavior, switch both to:
-
-- `strategy.threshold_mode: fixed`
-- `regimes.threshold_mode: fixed`
-
-`fixed` mode is causal: it calibrates once on the initial window (no full-series quantile look-ahead).
-
-## On-chain validation feed
-
-`src.pipeline` now integrates an on-chain validation frame from DefiLlama:
-
-- `onchain_usdc_price`
-- `onchain_usdt_price`
-- `onchain_usdc_minus_1`
-- `onchain_usdt_minus_1`
-- `onchain_log_usdc_dev`
-- `onchain_log_usdt_dev`
-- `onchain_proxy`
-- `onchain_divergence`
-- `onchain_depeg_flag`
-- `onchain_depeg_flag_effective`
-- `onchain_data_stale`
-
-`depeg_flag` used by strategy is now the safety union:
-
-- `market_depeg_flag` from premium proxy
-- freshness-gated `onchain_depeg_flag_effective`
-
-Configuration lives under `onchain:` in `configs/config.yaml`.
-
-Sampling/cadence note:
-
-- DefiLlama stablecoin prices are daily.
-- `onchain_depeg_flag` persistence is therefore computed on the native daily cadence before alignment to intraday bars.
-- current defaults are tuned for daily feed semantics (`onchain.depeg_delta_log: 0.005`, `onchain.depeg_min_consecutive: 1`).
-- on-chain values are marked stale when `onchain_source_age_hours > onchain.max_source_age_hours`; stale rows are excluded from effective depeg safety union.
-
-Proxy availability note:
-
-- when cross-asset USDC/USDT proxy legs are available (typical Binance perp episodes), debiased premium `p` is fully informative
-- when they are unavailable for an episode, pipeline is fail-closed by default (`premium.fail_on_missing_proxy: true`) and the episode is skipped in multi-episode reports
-- if you intentionally disable fail-closed behavior, use that run primarily for depeg safety/on-chain validation and state that debiased premium is not the main signal
-
-## Execution quality diagnostics (order-book snapshot slippage + resilience)
-
-Bootstrap publicly available execution datasets (orderbook/trades where available) into
-`data/processed/orderbook/<episode>/...`.
-
-Recommended execution-L2 scope (default):
-
-```bash
-python -m src.execution_data \
-  --skip-existing \
-  --include-agg-trades
-```
-
-This default targets only L2-ready execution windows (`*2024_binance`) so execution conclusions
-are not blocked by missing 2023 public L2 data.
-
-If you still want to bootstrap 2023 premium/regime episodes for non-L2 analysis:
-
-```bash
-python -m src.execution_data \
-  --episodes bybit_usdc_depeg_2023 okx_usdc_depeg_2023 \
-  --skip-existing
-```
-
-Optional for manual portal exports (Bybit/OKX historical pages): provide a CSV with direct URLs:
-
-```bash
-python -m src.execution_data \
-  --episodes bybit_usdc_depeg_2023 okx_usdc_depeg_2023 \
-  --external-url-manifest data/raw/execution_external_urls.csv \
-  --skip-existing
-```
-
-`src.execution_data` also attempts OKX public `priapi` orderbook discovery (module `4`, 400-level L2) by default.
-Disable it with `--disable-okx-priapi-orderbook`.
-
-Build execution diagnostics (snapshot book-walk when available; explicit fallback otherwise):
-
-```bash
+python -m src.ablation_report --output-dir reports/tables
+python -m src.robustness_report --output-dir reports/robustness
+python -m src.tune_gating --episodes "data/processed/episodes/*2024_binance/prices_matrix.csv" --apply
+python -m src.calibration_report --episodes "data/processed/episodes/*2024_binance/prices_matrix.csv" --output-dir reports/final
+python -m src.presentation_pack --output-dir reports/final --reports-root reports
+python -m src.execution_data --skip-existing --include-agg-trades
 python -m src.execution_quality --output-dir reports/final
 ```
 
-Coverage behavior:
-
-- by default, diagnostics are snapshot-first: trade-level slippage vs size is computed from `bookDepth` snapshots + tick trades where alignment is available.
-- rows without usable snapshot alignment are kept with explicit `slippage_method=bar_proxy_next_bar_abs_return` fallback.
-- if you need strict fail-closed behavior, pass:
+Packaging helpers:
 
 ```bash
-python -m src.execution_quality --output-dir reports/final --strict-l2-required
+./scripts/clean_local_artifacts.sh
+./scripts/package_submission.sh
 ```
 
-Artifacts:
+## Input and output contract (short)
 
-- `reports/final/execution_l2_coverage.csv`
-- `reports/final/execution_slippage_proxy.csv`
-- `reports/final/execution_slippage_vs_size.csv`
-- `reports/final/execution_cross_quote_comparison.csv`
-- `reports/final/execution_resilience.csv`
-- `reports/final/execution_venue_comparison.csv`
-- `reports/final/execution_quality_report.md`
+Expected matrix format:
 
-Method notes:
+- index: `timestamp_utc` (UTC DatetimeIndex)
+- columns: symbols (`BTCUSDC-PERP`, `BTCUSDT-PERP`, ...)
+- values: price
+- format: `.parquet` or `.csv`
 
-- when snapshots are available, slippage is computed via side-aware book-walk interpolation on cumulative depth levels (`±1%..±5%`), plus DNL and queue-pressure proxies.
-- volatility control remains reported via excess and normalized impact fields for compatibility.
-- cross-venue comparison is segmented by `market_type` (`spot` vs `derivatives`) to avoid non-homogeneous venue ranking.
-- do not infer a definitive "best liquidity venue/quote" without fee/funding/instrument normalization and full replay-grade TCA.
-
-## Ablation report (single script)
-
-Run the full ablation ladder:
-
-```bash
-python -m src.ablation_report \
-  --price-matrix data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv \
-  --output-dir reports/tables
-```
-
-Compare both premium proxy methods with the same ablation stack:
-
-```bash
-python -m src.ablation_report \
-  --price-matrix data/processed/episodes/yen_unwind_2024_binance/prices_matrix.csv \
-  --proxy-methods median pw_rolling \
-  --output-dir reports/tables
-```
-
-Artifacts:
-
-- `reports/tables/ablation_metrics.csv`
-- `reports/tables/ablation_trade_log_<variant>.csv`
-- `reports/tables/ablation_summary.md`
-
-When multiple proxy methods are requested, trade logs are exported as:
-
-- `reports/tables/ablation_trade_log_<proxy_method>_<variant>.csv`
-
-Variants included:
-
-- `naive`
-- `debias_only`
-- `plus_robust`
-- `plus_regime`
-- `plus_hawkes`
-
-## Robustness report (walk-forward + factorial ablations + stress matrix)
-
-Run the full quant-clean robustness protocol:
-
-```bash
-python -m src.robustness_report \
-  --config configs/config.yaml \
-  --episodes "data/processed/episodes/*/prices_matrix.*" \
-  --output-dir reports/robustness
-```
-
-This runner performs:
-
-- chronological walk-forward OOS splits (`train=[0..i-1]`, `test=i`)
-- per-split recalibration on train windows
-- full factorial ablations:
-  - `premium(naive|debiased) x gating(on|off) x statmech(on|off) x hawkes(on|off)`
-- stress scenarios on every variant:
-  - `base`, `fees_x2`, `spread_x2`, `latency_1bar`, `liquidity_half`, `combined_worst`
-
-Artifacts:
-
-- `reports/robustness/walkforward_split_metrics.csv`
-- `reports/robustness/ablation_factorial_oos.csv`
-- `reports/robustness/stress_matrix_oos.csv`
-- `reports/robustness/robustness_verdict.csv`
-- `reports/robustness/robustness_summary.md`
-
-Strict verdict rule (`robustness_verdict.csv`):
-
-- `PASS` iff base scenario has `Sharpe > 0` and `PnL net > 0`
-- and at least `3/4` single stress scenarios pass (`fees_x2`, `spread_x2`, `latency_1bar`, `liquidity_half`)
-- `combined_worst` is reported separately as severity check
-
-## Final calibration and presentation polish
-
-Run calibration comparison (baseline Notice defaults vs tuned config):
-
-```bash
-python -m src.calibration_report \
-  --episodes "data/processed/episodes/*2024_binance/prices_matrix.csv" \
-  --output-dir reports/final
-```
-
-Calibration/tuning Sharpe naming convention:
-
-- `*_sharpe_full_raw` = full-series, non-annualized Sharpe.
-
-Build final polished pack (consolidated CSV + comparison figures + executive summary):
-
-```bash
-python -m src.presentation_pack --output-dir reports/final --reports-root reports
-```
-
-Main final artifacts:
-
-- `reports/final/calibration_report.md`
-- `reports/final/calibration_details.csv`
-- `reports/final/final_episode_metrics_long.csv`
-- `reports/final/final_episode_metrics_wide.csv`
-- `reports/final/final_onchain_snapshot.csv`
-- `reports/final/executive_summary.md`
-- `reports/final/figures/sharpe_naive_vs_gated.png`
-- `reports/final/figures/pnl_naive_vs_gated.png`
-- `reports/final/figures/fliprate_naive_vs_gated.png`
-- `reports/final/execution_slippage_proxy.csv`
-- `reports/final/edge_net_size_curve.csv`
-- `reports/final/break_even_premium_curve.csv`
-- `reports/final/edge_net_summary.csv`
-- `reports/final/figures/figure_4_edge_net.png`
-- `reports/final/execution_cross_quote_comparison.csv`
-- `reports/final/execution_resilience.csv`
-- `reports/final/execution_venue_comparison.csv`
-- `reports/final/execution_quality_report.md`
-
-## Outputs
+Pipeline output files (default):
 
 - `reports/tables/metrics.csv`
 - `reports/tables/trade_log_gated.csv`
@@ -585,76 +152,7 @@ Main final artifacts:
 - `reports/figures/figure_3_phase_space.png`
 - `reports/figures/figure_4_edge_net.png`
 
-Metric convention in `metrics.csv`:
-- `sharpe` is computed on the full `net_pnl` series and is **non-annualized** (primary score for short episodes).
-- `sharpe_full_annualized` and `sharpe_active_annualized` are exported for reference only; short windows can produce unstable annualized values.
-- `sharpe_active` is computed on active position bars only (`position[t-1] != 0`) for diagnostics.
-- `hit_rate` is computed only on active position bars (`position[t-1] != 0`).
+## Where to read deeper details
 
-## Decision policy implemented
-
-Priority order:
-
-1. Hard safety override:
-   - if `depeg_flag` is true, decision is `Risk-off` (unconditional)
-2. Stress source classification (diagnostic + widening policy):
-   - `usdc_depeg_stress`
-   - `usdt_backing_concern`
-   - `technical_flow_imbalance`
-3. Source-aware response when not in hard safety override:
-   - `usdc_depeg_stress` => at least `Widen` (hard `Risk-off` is already enforced by `depeg_flag`)
-   - `usdt_backing_concern` => `Widen`
-   - `technical_flow_imbalance` => at least `Widen` in stress windows
-4. Hawkes (guarded optional):
-   - Hawkes gates are applied only when quality checks pass (`refit_count`, `fit_ok_ratio`, `n_t` uniqueness/variance).
-   - fixed mode (`strategy.hawkes_threshold_mode: fixed`): `n(t) > 0.85` => `Risk-off`, `n(t) > 0.70` => `Widen`
-   - adaptive mode (`strategy.hawkes_threshold_mode: expanding|rolling`): causal quantile thresholds from `n(t)` history
-   - when quality fails, Hawkes gating is disabled for decisions and reason is written to `hawkes_quality_reason`
-5. Else transient mode:
-   - if `execution_unifier.enabled: true`, compute causal `edge_gross_bps - cost_bps(size, regime)` and choose `optimal_size` on a size grid.
-   - `Trade` only when `expected_net_pnl_opt_bps > 0` and `optimal_size >= execution_unifier.trade_min_size`.
-   - if unifier is disabled, fallback remains `|m_t| > k * T_t * sigma_hat`.
-6. Sizing policy:
-   - `Trade` uses `position_size = optimal_size` (or legacy confidence size if unifier disabled).
-   - `Widen` sets a floor target (`execution_unifier.widen_floor_size`) and stateful backtest reduces open size non-increasingly toward that floor.
-
-Backtest execution policy (default):
-- `position_mode: stateful` (multi-bar holding)
-- enter on `Trade` with side from `sign(m_t)`
-- apply unifier sizing (`optimal_size`) when enabled; confidence sizing remains as legacy fallback
-- hold at least `min_holding_bars` after entry; `Widen` is not a flat order by default
-- exit on `Widen` only when `backtest.exit_on_widen: true` (legacy-compatible opt-in)
-- exit immediately on `Risk-off` or mean-reversion (`m_t` crossing 0 versus held side)
-- in `stateful` mode, the effective `position_size` is persistent while a position is open:
-  positive new size updates exposure; missing/zero size keeps the last active size until exit/flip
-- turnover/costs include entries, exits, and flips (`|Δposition|`)
-- gated backtests can use dynamic per-bar costs from unifier (`edge_cost_bps_opt`) while naive keeps fixed `backtest.cost_bps`
-- PnL convention: `gross_pnl[t] = position[t-1] * (-(premium[t]-premium[t-1]))` on log-premium.
-  This corresponds to mean-reversion on the premium spread (`short premium` profits when premium narrows).
-
-## Episodes currently generated in this repository
-
-Premium/regime scope (all generated episodes):
-
-- `bybit_usdc_depeg_2023` (Bybit spot, 2023-03-10 to 2023-03-11)
-- `okx_usdc_depeg_2023` (OKX futures, 2023-03-10 to 2023-03-11)
-- `march_vol_2024_binance` (Binance futures, 2024-03-12 to 2024-03-13)
-- `yen_unwind_2024_binance` (Binance futures, 2024-08-05 to 2024-08-06)
-- `yen_followthrough_2024_binance` (Binance futures, 2024-08-07 to 2024-08-08)
-
-Execution-L2 default scope (for execution-quality conclusions):
-
-- `march_vol_2024_binance`
-- `yen_unwind_2024_binance`
-- `yen_followthrough_2024_binance`
-
-The 2023 Bybit/OKX episodes are kept for premium/regime analysis but excluded from default execution-L2 conclusions due to missing public historical L2 coverage in that window.
-
-- `smoke_2024_08_05` (short smoke-run artifact)
-
-Reference episodes from the Notice spec (LUNA/UST, FTX) are part of the target checklist but are not included in the current generated artifact set.
-
-## Notes
-
-- This repository is intentionally modular: the notebook is a report surface, while calculations stay in `src/`.
-- Current implementation is a robust baseline and is designed for quick iteration under the 1-week timeline.
+- Full quantitative policy, defaults, and definitions: `AGENTS.md`
+- Original project notes: `Notice.pdf`, `Notice + Hawkes.pdf`
